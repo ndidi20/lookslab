@@ -21,7 +21,7 @@ export default function ScanPage() {
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL), // fallback
+          
         ]);
         if (!alive) return;
         setFA(faceapi);

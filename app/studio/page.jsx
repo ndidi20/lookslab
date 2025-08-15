@@ -32,7 +32,7 @@ export default function FaceOffStudio() {
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
+          
         ]);
         if (!alive) return;
         setFA(faceapi);
