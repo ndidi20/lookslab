@@ -1,8 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-
-// ✅ TFJS backends first (prevents “backend undefined”)
+import * as faceapi from 'face-api.js';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import '@tensorflow/tfjs-backend-cpu';
@@ -12,34 +11,19 @@ export default function ScanPage() {
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(true);
   const [imgURL, setImgURL] = useState('');
-  const [result, setResult] = useState(null);
+  const [res, setRes] = useState(null);
 
   const canRef = useRef(null);
-
-  // --- lazy import face-api to keep bundle slim
-  const faceapiRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        // Backend: webgl if possible else cpu
-        try { await tf.setBackend('webgl'); } catch { /* ignore */ }
-        if (tf.getBackend() !== 'webgl') await tf.setBackend('cpu');
-        await tf.ready();
-
-        const faceapi = (faceapiRef.current = (await import('face-api.js')).default ?? (await import('face-api.js')));
-        const MODEL_URL = '/models';
-
-        await Promise.all([
-          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        ]);
-
-        if (mounted) setReady(true);
+        await ensureVisionReady();
+        if (!mounted) return;
+        setReady(true);
       } catch (e) {
         console.error(e);
-        alert('Failed to initialize models from /models');
       }
     })();
     return () => { mounted = false; };
@@ -48,44 +32,36 @@ export default function ScanPage() {
   const onPick = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const url = URL.createObjectURL(f);
-    setImgURL(url);
-    setResult(null);
+    setImgURL(URL.createObjectURL(f));
+    setRes(null);
   };
 
   const analyze = async () => {
-    if (!ready || !imgURL || !consent || busy) return;
+    if (!ready || !imgURL || !consent) return;
     setBusy(true);
     try {
-      const faceapi = faceapiRef.current;
       const img = await loadImg(imgURL);
-      const c = drawToCanvasContain(img, canRef.current, 800, 800 * 0.75);
+      const c = canRef.current;
+      const W = 640, H = 800;
+      c.width = W; c.height = H;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'black'; ctx.fillRect(0,0,W,H);
+      const fit = fitContain(img.width, img.height, W, H);
+      ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
 
-      // Detect *any* faces, pick the best score
-      const detections = await faceapi
-        .detectAllFaces(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.2 }))
+      // permissive detector: smaller input, lower threshold => faster + more forgiving
+      const det = await faceapi
+        .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 }))
         .withFaceLandmarks();
 
-      if (!detections?.length) {
-        alert('No face detected — try a brighter image or larger crop.');
-        setBusy(false);
-        return;
+      if (!det?.landmarks) {
+        // no blocking alerts — just clear result
+        setRes(null);
+      } else {
+        setRes(scoreFromLandmarks(det.landmarks));
       }
-
-      // best by detection score or largest box
-      const best = detections
-        .map(d => ({ d, area: d.detection.box.width * d.detection.box.height }))
-        .sort((a, b) => (b.d.detection.score - a.d.detection.score) || (b.area - a.area))[0].d;
-
-      // landmarks scoring
-      const res = scoreFromLandmarks(best.landmarks);
-      setResult(res);
-
-      // (optional) draw tiny overlay guide
-      drawLandmarksOverlay(c, best.landmarks);
     } catch (e) {
       console.error(e);
-      alert('Analysis failed.');
     } finally {
       setBusy(false);
     }
@@ -97,7 +73,8 @@ export default function ScanPage() {
       <p className="text-sm text-neutral-400 mb-6">All analysis runs in your browser. Images aren’t uploaded.</p>
 
       <div className="rounded-xl border border-neutral-800 bg-black/40 p-4">
-        <div className="aspect-[3/4] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900 flex items-center justify-center">
+        {/* view box (no stretch) */}
+        <div className="aspect-[4/5] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900 flex items-center justify-center">
           {imgURL ? (
             <img src={imgURL} alt="" className="w-full h-full object-contain" />
           ) : (
@@ -121,28 +98,56 @@ export default function ScanPage() {
           </button>
 
           <label className="ml-auto flex items-center gap-2 text-sm text-neutral-400">
-            <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
+            <input type="checkbox" checked={consent} onChange={(e)=>setConsent(e.target.checked)} />
             I consent to analyze this image on‑device
           </label>
         </div>
+
+        {!ready && (
+          <p className="mt-2 text-xs text-amber-400">Failed to initialize models from /public/models</p>
+        )}
       </div>
 
-      {result && (
+      {res && (
         <div className="mt-6 grid md:grid-cols-2 gap-4">
-          <Break label="Overall" value={result.overall} big />
-          <Break label="Symmetry" value={result.breakdown.symmetry} />
-          <Break label="Proportions" value={result.breakdown.proportions} />
-          <Break label="Jawline" value={result.breakdown.jawline} />
-          <Break label="Potential" value={result.potential} />
+          <Card label="Overall" value={res.overall} big />
+          <Card label="Symmetry" value={res.breakdown.symmetry} />
+          <Card label="Proportions" value={res.breakdown.proportions} />
+          <Card label="Jawline" value={res.breakdown.jawline} />
+          <Card label="Potential" value={res.potential} />
         </div>
       )}
     </main>
   );
 }
 
-/* ─── UI bits ─────────────────────────────────────────────────────────── */
+/* ---------- shared init (single TF instance, single model load) ---------- */
 
-function Break({ label, value, big = false }) {
+let __visionReady = false;
+async function ensureVisionReady() {
+  if (__visionReady) return true;
+
+  // choose backend once
+  try {
+    await tf.setBackend('webgl');
+  } catch {
+    await tf.setBackend('cpu');
+  }
+  await tf.ready();
+
+  const URL = '/models';
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(URL),
+  ]);
+
+  __visionReady = true;
+  return true;
+}
+
+/* ---------- UI bits ---------- */
+
+function Card({ label, value, big=false }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
       <div className={`flex items-center justify-between ${big ? 'text-xl font-semibold' : ''}`}>
@@ -153,28 +158,7 @@ function Break({ label, value, big = false }) {
   );
 }
 
-/* ─── Analysis helpers ───────────────────────────────────────────────── */
-
-function drawToCanvasContain(img, canvas, W, H) {
-  canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = 'black'; ctx.fillRect(0, 0, W, H);
-  const fit = fitContain(img.width, img.height, W, H);
-  ctx.drawImage(img, (W - fit.w) / 2, (H - fit.h) / 2, fit.w, fit.h);
-  return canvas;
-}
-
-function drawLandmarksOverlay(canvas, landmarks) {
-  const ctx = canvas.getContext('2d');
-  const pts = landmarks.positions;
-  ctx.save();
-  ctx.strokeStyle = 'rgba(155,125,255,0.8)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-  ctx.stroke();
-  ctx.restore();
-}
+/* ---------- scoring ---------- */
 
 function scoreFromLandmarks(landmarks) {
   const lm = landmarks.positions;
@@ -190,33 +174,35 @@ function scoreFromLandmarks(landmarks) {
     symErr += Math.abs(da - db);
   }
   symErr /= pairs.length;
-  const symScore = clamp(10 - (symErr / (faceW||1)) * 40, 0, 10);
+  const symmetry = clamp(10 - (symErr / (faceW||1)) * 40, 0, 10);
 
   // proportions
   const brow = lm[27], chin = lm[8];
   const faceH = Math.hypot(chin.x - brow.x, chin.y - brow.y);
   const ratio = faceH / (faceW || 1);
-  const ratioScore = clamp(10 - Math.abs(ratio - 1.45)*22, 0, 10);
+  const proportions = clamp(10 - Math.abs(ratio - 1.45)*22, 0, 10);
 
   // jawline
   const left = lm[4], right = lm[12];
   const jaw = angleAt(lm[8], left, right) * 180/Math.PI;
-  let jawScore;
-  if (jaw < 60) jawScore = 6 + (jaw - 60) * 0.02;
-  else if (jaw > 115) jawScore = 6 - (jaw - 115) * 0.06;
-  else jawScore = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
-  jawScore = clamp(jawScore, 0, 10);
+  let jawline;
+  if (jaw < 60) jawline = 6 + (jaw - 60) * 0.02;
+  else if (jaw > 115) jawline = 6 - (jaw - 115) * 0.06;
+  else jawline = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
+  jawline = clamp(jawline, 0, 10);
 
-  // pose penalty (gentle)
+  // pose penalty (forgiven but still dampens)
   const pose = posePenalty(lm);
-  const base = 0.46*symScore + 0.34*ratioScore + 0.20*jawScore;
-  const overall = clamp(base - pose*1.2, 0, 10);
+  const base = 0.46*symmetry + 0.34*proportions + 0.20*jawline;
+  const overall = clamp(base - pose*1.25, 0, 10);
 
-  // potential: cap above current; depends on geometry headroom
-  const headroom = (symScore + ratioScore + jawScore)/3;
-  const potential = clamp(Math.max(overall, 0.6*overall + 0.4*headroom + 1.0), overall, 10);
+  // potential (ceiling you could reach)
+  const potential = clamp( overall + ( (10-overall)*0.35 ) - pose*0.5, 0, 10 );
 
-  return { overall, potential, breakdown: { symmetry: symScore, proportions: ratioScore, jawline: jawScore } };
+  return {
+    overall, potential,
+    breakdown: { symmetry, proportions, jawline }
+  };
 }
 
 function posePenalty(lm) {
@@ -229,14 +215,11 @@ function posePenalty(lm) {
   const eyeDist = Math.hypot(eyeDX, eyeDY) || 1;
   const yawDeg = Math.abs((nose.x - midEye.x)/eyeDist) * 60;
 
-  return clamp((smooth(rollDeg,6,22)+smooth(yawDeg,9,28))/2, 0, 1);
+  return clamp((smooth(rollDeg,5,22)+smooth(yawDeg,8,26))/2, 0, 1);
 }
 
-function angleAt(p, a, b) {
-  const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y};
-  const dot=v1.x*v2.x+v1.y*v2.y, m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y);
-  return Math.acos(clamp(dot/((m1*m2)||1),-1,1));
-}
+/* ---------- tiny utils ---------- */
+function angleAt(p, a, b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y}; const dot=v1.x*v2.x+v1.y*v2.y; const m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y); return Math.acos(clamp(dot/((m1*m2)||1),-1,1)); }
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 function smooth(v, ok, bad){ if (v<=ok) return 0; if (v>=bad) return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
 function fitContain(iw, ih, ow, oh){ const s=Math.min(ow/iw, oh/ih); return { w: Math.round(iw*s), h: Math.round(ih*s) }; }
