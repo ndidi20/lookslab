@@ -15,9 +15,9 @@ export default function FaceOffStudio() {
 
   const [left,  setLeft]  = useState({ url:'', res:null });
   const [right, setRight] = useState({ url:'', res:null });
+
   const canvasRef = useRef(null);
 
-  // auth + models
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -129,7 +129,7 @@ export default function FaceOffStudio() {
   // gating
   if (me.checking) return <Shell><p className="text-neutral-400">Checking access…</p></Shell>;
   if (!me.loggedIn) return <Gate title="Face‑Off Studio" body="Sign in to use Face‑Off Studio and export cards." primary={{href:'/login',label:'Log in'}} secondary={{href:'/',label:'Back home'}} />;
-  if (!me.pro) return <Gate title="Face‑Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
+  if (!me.pro)       return <Gate title="Face‑Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
 
   return (
     <Shell>
@@ -171,7 +171,7 @@ export default function FaceOffStudio() {
   );
 }
 
-/* ---------- one-time TFJS + model init ---------- */
+/* ---------- TF + models ---------- */
 let __studioVisionReady = false;
 async function ensureVisionReady(){
   if (__studioVisionReady) return true;
@@ -246,7 +246,7 @@ function Row({ label, value }) {
   );
 }
 
-/* ---------- analysis ---------- */
+/* ---------- shared analysis ---------- */
 async function analyzeOne(url) {
   const img = await loadImg(url);
   const W=640, H=800;
@@ -264,55 +264,70 @@ async function analyzeOne(url) {
   return scoreFromLandmarks(det.landmarks);
 }
 
-/* same scoring as Scan (robust proportions) */
 function scoreFromLandmarks(landmarks) {
   const lm = landmarks.positions;
-
-  const d = (a, b) => Math.hypot(lm[b].x - lm[a].x, lm[b].y - lm[a].y);
-  const minX = Math.min(...lm.map(p => p.x)), maxX = Math.max(...lm.map(p => p.x));
-  const widths = [ d(0,16), d(3,13), d(4,12), d(36,45)*2.1, (maxX-minX)*0.90 ].filter(v => v>0 && Number.isFinite(v));
-  const median = (arr) => { const a=[...arr].sort((x,y)=>x-y); const m=Math.floor(a.length/2); return a.length%2?a[m]:(a[m-1]+a[m])/2; };
-  const faceW = Math.max(1, median(widths));
 
   const midX = lm[27].x;
   const pairs = [[36,45],[39,42],[31,35],[48,54],[3,13]];
   let symErr = 0;
-  for (const [a,b] of pairs) { const da=Math.abs(midX-lm[a].x), db=Math.abs(lm[b].x-midX); symErr += Math.abs(da-db); }
-  symErr /= pairs.length;
-  const symmetry = clamp(10 - (symErr/faceW) * 40, 0, 10);
+  for (const [a,b] of pairs) {
+    const da = Math.abs(midX - lm[a].x);
+    const db = Math.abs(lm[b].x - midX);
+    symErr += Math.abs(da - db);
+  }
+  const { faceW, ratio } = robustFaceMetrics(lm);
+  const symmetry = clamp(10 - (symErr / faceW) * 40, 0, 10);
 
-  const brow = lm[27], chin = lm[8];
-  const faceH = Math.hypot(chin.x-brow.x, chin.y-brow.y);
-  const ratio = faceH / faceW;
-  const IDEAL=1.45, TOL=0.18;
-  const excess = Math.max(0, Math.abs(ratio-IDEAL)-TOL);
-  const proportions = clamp(10 - excess*35, 0, 10);
+  const IDEAL = 1.45, TOL = 0.20;
+  const excess = Math.max(0, Math.abs(ratio - IDEAL) - TOL);
+  const proportions = clamp(10 - excess * 25, 0, 10);
 
-  const jawDeg = angleAt(lm[8], lm[4], lm[12]) * 180/Math.PI;
+  const left = lm[4], right = lm[12];
+  const jaw = angleAt(lm[8], left, right) * 180/Math.PI;
   let jawline;
-  if (jawDeg < 60)       jawline = 6 + (jawDeg - 60) * 0.02;
-  else if (jawDeg > 115) jawline = 6 - (jawDeg - 115) * 0.06;
-  else                   jawline = 8 + (1 - Math.abs(jawDeg - 90)/20) * 2;
+  if (jaw < 60) jawline = 6 + (jaw - 60) * 0.02;
+  else if (jaw > 115) jawline = 6 - (jaw - 115) * 0.06;
+  else jawline = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
   jawline = clamp(jawline, 0, 10);
 
   const pose = posePenalty(lm);
-  const overall = clamp(0.46*symmetry + 0.34*proportions + 0.20*jawline - pose*1.25, 0, 10);
-  const potential = clamp(overall + ((10-overall)*0.35) - pose*0.5, 0, 10);
+  const base = 0.46*symmetry + 0.34*proportions + 0.20*jawline;
+  const overall = clamp(base - pose*1.25, 0, 10);
+  const potential = clamp( overall + ((10-overall)*0.35) - pose*0.5, 0, 10 );
 
   return { overall, potential, breakdown: { symmetry, proportions, jawline } };
+}
+
+function robustFaceMetrics(lm) {
+  const d = (a,b) => Math.hypot(lm[b].x-lm[a].x, lm[b].y-lm[a].y);
+  const minX = Math.min(...lm.map(p=>p.x)), maxX = Math.max(...lm.map(p=>p.x));
+  const widths = [ d(0,16), d(3,13), d(4,12), d(36,45)*2.2, (maxX-minX)*0.92 ]
+    .filter(v => Number.isFinite(v) && v > 0);
+  const median = a => { const s=[...a].sort((x,y)=>x-y), m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
+  const faceW = Math.max(1, median(widths));
+
+  const browPts = [17,18,19,20,21,22,23,24];
+  const browMid = browPts.reduce((acc,i)=>({x:acc.x+lm[i].x, y:acc.y+lm[i].y}), {x:0,y:0});
+  browMid.x/=browPts.length; browMid.y/=browPts.length;
+  const chin = lm[8];
+  const faceH = Math.hypot(chin.x-browMid.x, chin.y-browMid.y);
+
+  let ratio = faceH / faceW;
+  ratio = Math.max(0.9, Math.min(2.0, ratio));
+  return { faceW, faceH, ratio };
 }
 
 function posePenalty(lm){
   const L=lm[36], R=lm[45];
   const eyeDX=R.x-L.x, eyeDY=R.y-L.y;
   const rollDeg=Math.abs(Math.atan2(eyeDY,eyeDX)*180/Math.PI);
-  const nose=lm[33], midEye={x:(L.x+R.x)/2, y:(L.y+R.y)/2};
+  const nose=lm[33]; const midEye={x:(L.x+R.x)/2,y:(L.y+R.y)/2};
   const eyeDist=Math.hypot(eyeDX,eyeDY)||1;
   const yawDeg=Math.abs((nose.x-midEye.x)/eyeDist)*60;
   return clamp((smooth(rollDeg,5,22)+smooth(yawDeg,8,26))/2,0,1);
 }
 
-/* utils */
+/* ---------- utils ---------- */
 function angleAt(p,a,b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y}; const dot=v1.x*v2.x+v1.y*v2.y; const m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y); return Math.acos(clamp(dot/((m1*m2)||1),-1,1)); }
 function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
 function smooth(v,ok,bad){ if(v<=ok)return 0; if(v>=bad)return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
