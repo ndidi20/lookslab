@@ -14,7 +14,7 @@ export default function FaceOffStudio() {
 
   const canvasRef = useRef(null);
 
-  // auth + model init
+  // auth + model init (NO tf.ready / NO setBackend)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -27,20 +27,15 @@ export default function FaceOffStudio() {
       }
 
       try {
-        await faceapi.tf.ready();
-        try { await faceapi.tf.setBackend('webgl'); } catch { await faceapi.tf.setBackend('cpu'); }
-        await faceapi.tf.ready();
-
         const MODEL_URL = '/models';
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
         ]);
-
         if (mounted) setReady(true);
       } catch (e) {
         console.error(e);
-        alert('Failed to initialize models from /public/models');
+        alert('Failed to load models from /models');
       }
     })();
     return () => { mounted = false; };

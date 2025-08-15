@@ -12,25 +12,20 @@ export default function ScanPage() {
   const videoRef = useRef(null);
   const canRef = useRef(null);
 
-  // init TF backend + load models
+  // Load models (no tf.ready / no backend switching needed)
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        await faceapi.tf.ready();
-        try { await faceapi.tf.setBackend('webgl'); } catch { await faceapi.tf.setBackend('cpu'); }
-        await faceapi.tf.ready();
-
         const MODEL_URL = '/models';
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
         ]);
-
         if (mounted) setReady(true);
       } catch (e) {
         console.error(e);
-        alert('Failed to initialize models from /public/models');
+        alert('Failed to load models from /models');
       }
     })();
     return () => { mounted = false; };
@@ -58,7 +53,7 @@ export default function ScanPage() {
         .detectSingleFace(frame, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }))
         .withFaceLandmarks();
 
-      if (!det?.landmarks) { setResult(null); alert('No clear, forward-facing face found.'); return; }
+      if (!det?.landmarks) { setResult(null); alert('No clear, forward‑facing face found.'); return; }
 
       const res = scoreFromLandmarks(det.landmarks);
       drawOverlay(frame, det.landmarks);
@@ -81,7 +76,7 @@ export default function ScanPage() {
         .detectSingleFace(frame, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }))
         .withFaceLandmarks();
 
-      if (!det?.landmarks) { setResult(null); alert('No clear, forward-facing face found.'); return; }
+      if (!det?.landmarks) { setResult(null); alert('No clear, forward‑facing face found.'); return; }
 
       const res = scoreFromLandmarks(det.landmarks);
       drawOverlay(frame, det.landmarks);
@@ -259,4 +254,4 @@ function angleAt(p, a, b) {
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 function smooth(v, ok, bad){ if (v<=ok) return 0; if (v>=bad) return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
 function fitContain(iw, ih, ow, oh){ const s=Math.min(ow/iw, oh/ih); return { w: Math.round(iw*s), h: Math.round(ih*s) }; }
-function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
+function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.crossOrigin='anonymous'; i.onload=()=>res(i); i.src=src; }); }
