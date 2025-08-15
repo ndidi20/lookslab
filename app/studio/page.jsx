@@ -5,47 +5,50 @@ import Link from 'next/link';
 import * as faceapi from 'face-api.js';
 
 export default function FaceOffStudio() {
-  const [me, setMe] = useState({ loggedIn: false, pro: false, checking: true });
+  const [me, setMe]       = useState({ loggedIn:false, pro:false, checking:true });
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const [left, setLeft]   = useState({ url: '', res: null });
-  const [right, setRight] = useState({ url: '', res: null });
+  const [left, setLeft]   = useState({ url:'', res:null });
+  const [right, setRight] = useState({ url:'', res:null });
 
   const canvasRef = useRef(null);
 
-  // auth + model init (NO tf.ready / NO setBackend)
+  // auth + models
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     (async () => {
+      // auth (optional; keeps existing /api/me behavior)
       try {
-        const r = await fetch('/api/me', { cache: 'no-store' });
-        const j = r.ok ? await r.json() : { loggedIn: false, pro: false };
-        if (mounted) setMe({ ...j, checking: false });
-      } catch {
-        if (mounted) setMe({ loggedIn: false, pro: false, checking: false });
-      }
+        const r = await fetch('/api/me', { cache:'no-store' });
+        const j = r.ok ? await r.json() : { loggedIn:false, pro:false };
+        if (alive) setMe({ ...j, checking:false });
+      } catch { if (alive) setMe({ loggedIn:false, pro:false, checking:false }); }
 
       try {
+        if (faceapi?.tf?.setBackend) {
+          try { await faceapi.tf.setBackend('webgl'); }
+          catch { await faceapi.tf.setBackend('cpu'); }
+        }
         const MODEL_URL = '/models';
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
         ]);
-        if (mounted) setReady(true);
+        if (alive) setReady(true);
       } catch (e) {
         console.error(e);
-        alert('Failed to load models from /models');
+        alert('Failed to initialize models from /public/models');
       }
     })();
-    return () => { mounted = false; };
+    return () => { alive = false; };
   }, []);
 
   const pick = (side) => (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     const url = URL.createObjectURL(f);
-    (side === 'left' ? setLeft : setRight)(s => ({ ...s, url, res: null }));
+    (side === 'left' ? setLeft : setRight)(s => ({ ...s, url, res:null }));
   };
 
   const analyze = async () => {
@@ -58,9 +61,9 @@ export default function FaceOffStudio() {
       ]);
       setLeft(s => ({ ...s, res: out[0] }));
       setRight(s => ({ ...s, res: out[1] }));
-      if (!out[0] && !out[1]) alert('Upload at least one clear, straight‑on face.');
+      if (!out[0] && !out[1]) alert('Upload at least one clear, forward‑facing face.');
     } catch (e) {
-      console.error(e); alert('Analysis failed');
+      console.error(e); alert('Analysis failed.');
     } finally {
       setLoading(false);
     }
@@ -68,18 +71,21 @@ export default function FaceOffStudio() {
 
   const exportCard = async () => {
     const W = 1080, H = 1920, pad = 36;
-    const c = canvasRef.current; c.width = W; c.height = H;
+    const c = canvasRef.current; c.width=W; c.height=H;
     const ctx = c.getContext('2d');
 
-    const g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, '#0b0b12'); g.addColorStop(1, '#111016');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // bg
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#0b0b12'); g.addColorStop(1,'#111016');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
 
-    ctx.fillStyle = '#eee'; ctx.font = 'bold 64px system-ui'; ctx.textAlign = 'center';
+    // title
+    ctx.fillStyle = '#eee'; ctx.font = 'bold 64px system-ui'; ctx.textAlign='center';
     ctx.fillText('LooksLab Face‑Off', W/2, 110);
 
+    // image slots
     const cols = 2;
-    const boxW = (W - pad * (cols + 1)) / cols;
+    const boxW = (W - pad*(cols+1)) / cols;
     const boxH = Math.round(boxW * 1.25);
 
     const drawSlot = async (slot, x) => {
@@ -87,18 +93,18 @@ export default function FaceOffStudio() {
       const img = await loadImg(slot.url);
       const fit = fitContain(img.width, img.height, boxW, boxH);
       const y = 200;
-
-      ctx.fillStyle = '#1c1b22'; roundRect(ctx, x, y, boxW, boxH, 22); ctx.fill();
+      ctx.fillStyle='#1c1b22'; roundRect(ctx, x, y, boxW, boxH, 22); ctx.fill();
       ctx.save(); clipRoundRect(ctx, x, y, boxW, boxH, 22);
-      ctx.drawImage(img, x + (boxW - fit.w)/2, y + (boxH - fit.h)/2, fit.w, fit.h);
+      ctx.drawImage(img, x+(boxW-fit.w)/2, y+(boxH-fit.h)/2, fit.w, fit.h);
       ctx.restore();
 
       if (slot.res) {
         const sY = y + boxH + 40;
-        ctx.textAlign = 'left'; ctx.font = '600 40px system-ui'; ctx.fillStyle = '#cfcfe8';
+        ctx.textAlign='left'; ctx.font='600 40px system-ui'; ctx.fillStyle='#cfcfe8';
         ctx.fillText(`Overall ${slot.res.overall.toFixed(1)}/10`, x, sY);
 
         const bars = [
+          ['Potential',   slot.res.potential],
           ['Symmetry',    slot.res.breakdown.symmetry],
           ['Proportions', slot.res.breakdown.proportions],
           ['Jawline',     slot.res.breakdown.jawline],
@@ -106,16 +112,14 @@ export default function FaceOffStudio() {
         let yy = sY + 30;
         for (const [label, val] of bars) {
           yy += 46;
-          ctx.fillStyle = '#8b8a9c'; ctx.font = '400 28px system-ui';
+          ctx.fillStyle='#8b8a9c'; ctx.font='400 28px system-ui';
           ctx.fillText(label, x, yy);
-
-          const bw = boxW, bh = 14; yy += 10;
-          ctx.fillStyle = '#2a2933'; roundRect(ctx, x, yy, bw, bh, 8); ctx.fill();
-          ctx.fillStyle = '#9b7dff'; roundRect(ctx, x, yy, (val/10)*bw, bh, 8); ctx.fill();
-
-          yy += 12; ctx.textAlign = 'right'; ctx.fillStyle = '#cfcfe8'; ctx.font = '500 26px system-ui';
+          const bw=boxW, bh=14; yy+=10;
+          ctx.fillStyle='#2a2933'; roundRect(ctx,x,yy,bw,bh,8); ctx.fill();
+          ctx.fillStyle='#9b7dff'; roundRect(ctx,x,yy,(val/10)*bw,bh,8); ctx.fill();
+          yy += 12; ctx.textAlign='right'; ctx.fillStyle='#cfcfe8'; ctx.font='500 26px system-ui';
           ctx.fillText(`${val.toFixed(1)}/10`, x + bw, yy);
-          ctx.textAlign = 'left';
+          ctx.textAlign='left';
         }
       }
     };
@@ -123,30 +127,43 @@ export default function FaceOffStudio() {
     await drawSlot(left, pad);
     await drawSlot(right, pad*2 + boxW);
 
+    // watermark
     if (me.pro) {
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.font = '700 34px system-ui';
-      ctx.textAlign = 'right';
-      ctx.fillText('LooksLab • PRO', W - 28, H - 28);
+      ctx.fillStyle='rgba(255,255,255,0.35)';
+      ctx.font='700 34px system-ui'; ctx.textAlign='right';
+      ctx.fillText('LooksLab • PRO', W-28, H-28);
     } else {
       ctx.save();
-      ctx.translate(W/2, H - 120);
+      ctx.translate(W/2, H-120);
       ctx.rotate(-Math.PI/180 * 8);
-      ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      ctx.font = '900 110px system-ui';
-      ctx.textAlign = 'center';
+      ctx.fillStyle='rgba(255,255,255,0.10)';
+      ctx.font='900 110px system-ui'; ctx.textAlign='center';
       ctx.fillText('looksLab.app', 0, 0);
       ctx.restore();
     }
 
     const url = c.toDataURL('image/jpeg', 0.92);
-    const a = document.createElement('a'); a.href = url; a.download = 'lookslab-faceoff.jpg'; a.click();
+    const a = document.createElement('a'); a.href=url; a.download='lookslab-faceoff.jpg'; a.click();
   };
 
-  // gating
+  // gating UI
   if (me.checking) return <Shell><p className="text-neutral-400">Checking access…</p></Shell>;
-  if (!me.loggedIn) return <Gate title="Face‑Off Studio" body="Sign in to use Face‑Off Studio and export cards." primary={{href:'/login',label:'Log in'}} secondary={{href:'/',label:'Back home'}} />;
-  if (!me.pro)      return <Gate title="Face‑Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
+  if (!me.loggedIn) return (
+    <Gate
+      title="Face‑Off Studio"
+      body="Sign in to use Face‑Off Studio and export cards."
+      primary={{ href:'/login', label:'Log in' }}
+      secondary={{ href:'/', label:'Back home' }}
+    />
+  );
+  if (!me.pro) return (
+    <Gate
+      title="Face‑Off Studio (Pro)"
+      body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports."
+      primary={{ href:'/pro', label:'Go Pro' }}
+      secondary={{ href:'/', label:'Back home' }}
+    />
+  );
 
   // tool
   return (
@@ -184,7 +201,8 @@ export default function FaceOffStudio() {
   );
 }
 
-/* ---------- small shells/components ---------- */
+/* ---------- shells & small components ---------- */
+
 function Shell({ children }) {
   return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>;
 }
@@ -231,10 +249,11 @@ function Slot({ label, url, res, onPick, clear }) {
 
       {res && (
         <div className="mt-3 text-sm grid grid-cols-2 gap-1">
-          <Row label="Overall" value={res.overall} />
-          <Row label="Symmetry" value={res.breakdown.symmetry} />
+          <Row label="Overall"   value={res.overall} />
+          <Row label="Potential" value={res.potential} />
+          <Row label="Symmetry"    value={res.breakdown.symmetry} />
           <Row label="Proportions" value={res.breakdown.proportions} />
-          <Row label="Jawline" value={res.breakdown.jawline} />
+          <Row label="Jawline"     value={res.breakdown.jawline} />
         </div>
       )}
     </div>
@@ -250,13 +269,14 @@ function Row({ label, value }) {
   );
 }
 
-/* ---------- analysis helpers (same core as scan) ---------- */
+/* ---------- analysis helpers (same as scan) ---------- */
+
 async function analyzeOne(url) {
   const img = await loadImg(url);
   const W = 640, H = 800;
-  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const c = document.createElement('canvas'); c.width=W; c.height=H;
   const ctx = c.getContext('2d');
-  ctx.fillStyle = 'black'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='black'; ctx.fillRect(0,0,W,H);
   const fit = fitContain(img.width, img.height, W, H);
   ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
 
@@ -268,11 +288,13 @@ async function analyzeOne(url) {
   return scoreFromLandmarks(det.landmarks);
 }
 
+/* ---- identical scoring block as in scan ---- */
 function scoreFromLandmarks(landmarks) {
   const lm = landmarks.positions;
-  const faceW = Math.hypot(lm[16].x - lm[0].x, lm[16].y - lm[0].y);
+  const faceW = dist(lm[0], lm[16]);
+  const faceH = dist(lm[8], lm[27]);
+  const midX  = lm[27].x;
 
-  const midX = lm[27].x;
   const pairs = [[36,45],[39,42],[31,35],[48,54],[3,13]];
   let symErr = 0;
   for (const [a,b] of pairs) {
@@ -281,27 +303,59 @@ function scoreFromLandmarks(landmarks) {
     symErr += Math.abs(da - db);
   }
   symErr /= pairs.length;
-  const symScore = clamp(10 - (symErr / (faceW||1)) * 40, 0, 10);
+  const symmetry = clamp(10 - (symErr / (faceW || 1)) * 40, 0, 10);
 
-  const brow = lm[27], chin = lm[8];
-  const faceH = Math.hypot(chin.x - brow.x, chin.y - brow.y);
   const ratio = faceH / (faceW || 1);
-  const ratioScore = clamp(10 - Math.abs(ratio - 1.45)*22, 0, 10);
+  const proportions = clamp(10 - Math.abs(ratio - 1.45) * 22, 0, 10);
 
-  const left = lm[4], right = lm[12];
-  const jaw = angleAt(chin, left, right) * 180/Math.PI;
-  let jawScore;
-  if (jaw < 60) jawScore = 6 + (jaw - 60) * 0.02;
-  else if (jaw > 115) jawScore = 6 - (jaw - 115) * 0.06;
-  else jawScore = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
-  jawScore = clamp(jawScore, 0, 10);
+  const jawAngleDeg = angleAt(lm[8], lm[4], lm[12]) * 180/Math.PI;
+  let jawline;
+  if (jawAngleDeg < 60)       jawline = 6 + (jawAngleDeg - 60) * 0.02;
+  else if (jawAngleDeg > 115) jawline = 6 - (jawAngleDeg - 115) * 0.06;
+  else                        jawline = 8 + (1 - Math.abs(jawAngleDeg - 90)/20) * 2;
+  jawline = clamp(jawline, 0, 10);
+
+  const eyeW = dist(lm[39], lm[36]);
+  const innerGap = dist(lm[39], lm[42]);
+  const eyeSpacing = scoreTo10(innerGap / (eyeW || 1), 1.0, 0.25);
+
+  const mouthW = dist(lm[48], lm[54]);
+  const mouthIdeal = 1.6 * (innerGap || 1);
+  const mouth = scoreTo10(mouthW / (mouthIdeal || 1), 1.0, 0.25);
+
+  const noseW = dist(lm[31], lm[35]);
+  const noseIdeal = 0.28 * (faceW || 1);
+  const nose = scoreTo10(noseW / (noseIdeal || 1), 1.0, 0.28);
 
   const pose = posePenalty(lm);
-  const base = 0.46*symScore + 0.34*ratioScore + 0.20*jawScore;
-  const overall = clamp(base - pose*2, 0, 10);
 
-  return { overall, breakdown: { symmetry: symScore, proportions: ratioScore, jawline: jawScore } };
+  const base =
+    0.30 * symmetry   +
+    0.22 * proportions+
+    0.18 * jawline    +
+    0.14 * eyeSpacing +
+    0.08 * mouth      +
+    0.08 * nose;
+
+  const overall = clamp(base - pose * 2.0, 0, 10);
+
+  const poseBoost = pose * 2.0;
+  const deficit = (s) => (10 - s);
+  const improvBoostWeighted =
+      0.35 * deficit(jawline)     +
+      0.25 * deficit(proportions) +
+      0.30 * deficit(mouth)       +
+      0.15 * deficit(symmetry)    +
+      0.08 * deficit(nose)        +
+      0.05 * deficit(eyeSpacing);
+  const softGain = 0.12 * improvBoostWeighted;
+  const hardCap  = Math.min(base + (10 - base) * 0.50, 9.2);
+  const potential = clamp(Math.max(overall, overall + poseBoost + softGain), 0, hardCap);
+
+  return { overall, potential, breakdown: { symmetry, proportions, jawline, eyeSpacing, mouth, nose } };
 }
+
+/* ---- shared math + canvas utils ---- */
 
 function posePenalty(lm) {
   const L = lm[36], R = lm[45];
@@ -321,9 +375,11 @@ function angleAt(p, a, b) {
   const dot=v1.x*v2.x+v1.y*v2.y, m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y);
   return Math.acos(clamp(dot/((m1*m2)||1),-1,1));
 }
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 function smooth(v, ok, bad){ if (v<=ok) return 0; if (v>=bad) return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
-function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
 function fitContain(iw, ih, ow, oh){ const s=Math.min(ow/iw, oh/ih); return { w: Math.round(iw*s), h: Math.round(ih*s) }; }
+function scoreTo10(ratio, ideal, tol){ const d=Math.abs(ratio-ideal)/(tol||1); return clamp(10 - d*10, 0, 10); }
+function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
 function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function clipRoundRect(ctx,x,y,w,h,r){ roundRect(ctx,x,y,w,h,r); ctx.clip(); }
