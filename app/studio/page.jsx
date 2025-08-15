@@ -3,9 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import * as faceapi from 'face-api.js';
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-backend-webgl';
-import '@tensorflow/tfjs-backend-cpu';
+import { ensureVisionReady, getVisionError } from '@/lib/vision';
 
 export default function FaceOffStudio() {
   const [me, setMe] = useState({ loggedIn:false, pro:false, checking:true });
@@ -15,22 +13,26 @@ export default function FaceOffStudio() {
 
   const [left,  setLeft]  = useState({ url:'', res:null });
   const [right, setRight] = useState({ url:'', res:null });
-
   const canvasRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
+      // auth
       try {
         const r = await fetch('/api/me', { cache: 'no-store' });
         const j = r.ok ? await r.json() : { loggedIn:false, pro:false };
         if (mounted) setMe({ ...j, checking:false });
       } catch { if (mounted) setMe({ loggedIn:false, pro:false, checking:false }); }
 
+      // vision
       try {
         await ensureVisionReady();
         if (mounted) setReady(true);
-      } catch (e) { console.error(e); }
+      } catch (e) {
+        console.error(e);
+        if (mounted) setReady(false);
+      }
     })();
     return () => { mounted = false; };
   }, []);
@@ -126,7 +128,7 @@ export default function FaceOffStudio() {
     const a=document.createElement('a'); a.href=url; a.download='lookslab-faceoff.jpg'; a.click();
   };
 
-  // gating
+  // PRO gating
   if (me.checking) return <Shell><p className="text-neutral-400">Checking access…</p></Shell>;
   if (!me.loggedIn) return <Gate title="Face‑Off Studio" body="Sign in to use Face‑Off Studio and export cards." primary={{href:'/login',label:'Log in'}} secondary={{href:'/',label:'Back home'}} />;
   if (!me.pro) return <Gate title="Face‑Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
@@ -136,7 +138,8 @@ export default function FaceOffStudio() {
       <h1 className="text-3xl font-bold mt-10 mb-2">Face‑Off Studio</h1>
       <p className="text-sm text-neutral-400 mb-6">Upload two pics → auto scores → export a 9:16 mog card.</p>
 
-      {!ready && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
+      {!ready && !getVisionError() && <p className="text-xs text-neutral-400">Loading face models…</p>}
+      {!ready && getVisionError() && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
 
       <div className="grid md:grid-cols-2 gap-5">
         <Slot label="Left"  url={left.url}  res={left.res}  onPick={pick('left')}  clear={()=>setLeft({url:'',res:null})} />
@@ -171,26 +174,8 @@ export default function FaceOffStudio() {
   );
 }
 
-/* ---------- shared init ---------- */
-
-let __studioVisionReady = false;
-async function ensureVisionReady(){
-  if (__studioVisionReady) return true;
-  try { await tf.setBackend('webgl'); } catch { await tf.setBackend('cpu'); }
-  await tf.ready();
-  const URL='/models';
-  await Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(URL),
-    faceapi.nets.faceLandmark68Net.loadFromUri(URL),
-  ]);
-  __studioVisionReady = true;
-  return true;
-}
-
-/* ---------- components ---------- */
-function Shell({ children }) {
-  return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>;
-}
+/* components */
+function Shell({ children }) { return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>; }
 function Gate({ title, body, primary, secondary }) {
   return (
     <Shell>
@@ -247,7 +232,7 @@ function Row({ label, value }) {
   );
 }
 
-/* ---------- analysis shared with Scan ---------- */
+/* analysis (shared scoring) */
 async function analyzeOne(url) {
   const img = await loadImg(url);
   const W=640, H=800;
@@ -258,7 +243,7 @@ async function analyzeOne(url) {
   ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
 
   const det = await faceapi
-    .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 }))
+    .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.08 }))
     .withFaceLandmarks();
 
   if (!det?.landmarks) return null;
@@ -296,10 +281,13 @@ function scoreFromLandmarks(landmarks) {
   const pose = posePenalty(lm);
   const base = 0.46*symmetry + 0.34*proportions + 0.20*jawline;
   const overall = clamp(base - pose*1.25, 0, 10);
-  const potential = clamp( overall + ( (10-overall)*0.35 ) - pose*0.5, 0, 10 );
+
+  const headroom = 10 - overall;
+  const potential = clamp(overall + 0.30 * Math.pow(headroom, 0.9) - pose*0.5, 0, 10);
 
   return { overall, potential, breakdown: { symmetry, proportions, jawline } };
 }
+
 function posePenalty(lm){
   const L=lm[36], R=lm[45];
   const eyeDX=R.x-L.x, eyeDY=R.y-L.y;
@@ -315,6 +303,6 @@ function angleAt(p,a,b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y
 function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
 function smooth(v,ok,bad){ if(v<=ok)return 0; if(v>=bad)return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
 function fitContain(iw,ih,ow,oh){ const s=Math.min(ow/iw,oh/ih); return { w:Math.round(iw*s), h:Math.round(ih*s) }; }
-function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
+function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.crossOrigin='anonymous'; i.onload=()=>res(i); i.src=src; }); }
 function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function clipRoundRect(ctx,x,y,w,h,r){ roundRect(ctx,x,y,w,h,r); ctx.clip(); }
