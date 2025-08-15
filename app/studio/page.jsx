@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import * as faceapi from 'face-api.js';
-import { ensureVisionReady, getVisionError } from '@/lib/vision';
+import * as tf from '@tensorflow/tfjs-core';
+import '@tensorflow/tfjs-backend-webgl';
+import '@tensorflow/tfjs-backend-cpu';
 
 export default function FaceOffStudio() {
   const [me, setMe] = useState({ loggedIn:false, pro:false, checking:true });
@@ -15,24 +17,20 @@ export default function FaceOffStudio() {
   const [right, setRight] = useState({ url:'', res:null });
   const canvasRef = useRef(null);
 
+  // auth + models
   useEffect(() => {
     let mounted = true;
     (async () => {
-      // auth
       try {
         const r = await fetch('/api/me', { cache: 'no-store' });
         const j = r.ok ? await r.json() : { loggedIn:false, pro:false };
         if (mounted) setMe({ ...j, checking:false });
       } catch { if (mounted) setMe({ loggedIn:false, pro:false, checking:false }); }
 
-      // vision
       try {
         await ensureVisionReady();
         if (mounted) setReady(true);
-      } catch (e) {
-        console.error(e);
-        if (mounted) setReady(false);
-      }
+      } catch (e) { console.error(e); }
     })();
     return () => { mounted = false; };
   }, []);
@@ -128,7 +126,7 @@ export default function FaceOffStudio() {
     const a=document.createElement('a'); a.href=url; a.download='lookslab-faceoff.jpg'; a.click();
   };
 
-  // PRO gating
+  // gating
   if (me.checking) return <Shell><p className="text-neutral-400">Checking access…</p></Shell>;
   if (!me.loggedIn) return <Gate title="Face‑Off Studio" body="Sign in to use Face‑Off Studio and export cards." primary={{href:'/login',label:'Log in'}} secondary={{href:'/',label:'Back home'}} />;
   if (!me.pro) return <Gate title="Face‑Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face‑Off cards and watermark‑light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
@@ -138,8 +136,7 @@ export default function FaceOffStudio() {
       <h1 className="text-3xl font-bold mt-10 mb-2">Face‑Off Studio</h1>
       <p className="text-sm text-neutral-400 mb-6">Upload two pics → auto scores → export a 9:16 mog card.</p>
 
-      {!ready && !getVisionError() && <p className="text-xs text-neutral-400">Loading face models…</p>}
-      {!ready && getVisionError() && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
+      {!ready && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
 
       <div className="grid md:grid-cols-2 gap-5">
         <Slot label="Left"  url={left.url}  res={left.res}  onPick={pick('left')}  clear={()=>setLeft({url:'',res:null})} />
@@ -174,8 +171,25 @@ export default function FaceOffStudio() {
   );
 }
 
-/* components */
-function Shell({ children }) { return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>; }
+/* ---------- one-time TFJS + model init ---------- */
+let __studioVisionReady = false;
+async function ensureVisionReady(){
+  if (__studioVisionReady) return true;
+  try { await tf.setBackend('webgl'); } catch { await tf.setBackend('cpu'); }
+  await tf.ready();
+  const URL='/models';
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(URL),
+  ]);
+  __studioVisionReady = true;
+  return true;
+}
+
+/* ---------- components ---------- */
+function Shell({ children }) {
+  return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>;
+}
 function Gate({ title, body, primary, secondary }) {
   return (
     <Shell>
@@ -232,7 +246,7 @@ function Row({ label, value }) {
   );
 }
 
-/* analysis (shared scoring) */
+/* ---------- analysis ---------- */
 async function analyzeOne(url) {
   const img = await loadImg(url);
   const W=640, H=800;
@@ -243,47 +257,47 @@ async function analyzeOne(url) {
   ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
 
   const det = await faceapi
-    .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.08 }))
+    .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 }))
     .withFaceLandmarks();
 
   if (!det?.landmarks) return null;
   return scoreFromLandmarks(det.landmarks);
 }
 
+/* same scoring as Scan (robust proportions) */
 function scoreFromLandmarks(landmarks) {
   const lm = landmarks.positions;
-  const faceW = Math.hypot(lm[16].x - lm[0].x, lm[16].y - lm[0].y);
+
+  const d = (a, b) => Math.hypot(lm[b].x - lm[a].x, lm[b].y - lm[a].y);
+  const minX = Math.min(...lm.map(p => p.x)), maxX = Math.max(...lm.map(p => p.x));
+  const widths = [ d(0,16), d(3,13), d(4,12), d(36,45)*2.1, (maxX-minX)*0.90 ].filter(v => v>0 && Number.isFinite(v));
+  const median = (arr) => { const a=[...arr].sort((x,y)=>x-y); const m=Math.floor(a.length/2); return a.length%2?a[m]:(a[m-1]+a[m])/2; };
+  const faceW = Math.max(1, median(widths));
 
   const midX = lm[27].x;
   const pairs = [[36,45],[39,42],[31,35],[48,54],[3,13]];
   let symErr = 0;
-  for (const [a,b] of pairs) {
-    const da = Math.abs(midX - lm[a].x);
-    const db = Math.abs(lm[b].x - midX);
-    symErr += Math.abs(da - db);
-  }
+  for (const [a,b] of pairs) { const da=Math.abs(midX-lm[a].x), db=Math.abs(lm[b].x-midX); symErr += Math.abs(da-db); }
   symErr /= pairs.length;
-  const symmetry = clamp(10 - (symErr / (faceW||1)) * 40, 0, 10);
+  const symmetry = clamp(10 - (symErr/faceW) * 40, 0, 10);
 
   const brow = lm[27], chin = lm[8];
-  const faceH = Math.hypot(chin.x - brow.x, chin.y - brow.y);
-  const ratio = faceH / (faceW || 1);
-  const proportions = clamp(10 - Math.abs(ratio - 1.45)*22, 0, 10);
+  const faceH = Math.hypot(chin.x-brow.x, chin.y-brow.y);
+  const ratio = faceH / faceW;
+  const IDEAL=1.45, TOL=0.18;
+  const excess = Math.max(0, Math.abs(ratio-IDEAL)-TOL);
+  const proportions = clamp(10 - excess*35, 0, 10);
 
-  const left = lm[4], right = lm[12];
-  const jaw = angleAt(lm[8], left, right) * 180/Math.PI;
+  const jawDeg = angleAt(lm[8], lm[4], lm[12]) * 180/Math.PI;
   let jawline;
-  if (jaw < 60) jawline = 6 + (jaw - 60) * 0.02;
-  else if (jaw > 115) jawline = 6 - (jaw - 115) * 0.06;
-  else jawline = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
+  if (jawDeg < 60)       jawline = 6 + (jawDeg - 60) * 0.02;
+  else if (jawDeg > 115) jawline = 6 - (jawDeg - 115) * 0.06;
+  else                   jawline = 8 + (1 - Math.abs(jawDeg - 90)/20) * 2;
   jawline = clamp(jawline, 0, 10);
 
   const pose = posePenalty(lm);
-  const base = 0.46*symmetry + 0.34*proportions + 0.20*jawline;
-  const overall = clamp(base - pose*1.25, 0, 10);
-
-  const headroom = 10 - overall;
-  const potential = clamp(overall + 0.30 * Math.pow(headroom, 0.9) - pose*0.5, 0, 10);
+  const overall = clamp(0.46*symmetry + 0.34*proportions + 0.20*jawline - pose*1.25, 0, 10);
+  const potential = clamp(overall + ((10-overall)*0.35) - pose*0.5, 0, 10);
 
   return { overall, potential, breakdown: { symmetry, proportions, jawline } };
 }
@@ -292,7 +306,7 @@ function posePenalty(lm){
   const L=lm[36], R=lm[45];
   const eyeDX=R.x-L.x, eyeDY=R.y-L.y;
   const rollDeg=Math.abs(Math.atan2(eyeDY,eyeDX)*180/Math.PI);
-  const nose=lm[33]; const midEye={x:(L.x+R.x)/2,y:(L.y+R.y)/2};
+  const nose=lm[33], midEye={x:(L.x+R.x)/2, y:(L.y+R.y)/2};
   const eyeDist=Math.hypot(eyeDX,eyeDY)||1;
   const yawDeg=Math.abs((nose.x-midEye.x)/eyeDist)*60;
   return clamp((smooth(rollDeg,5,22)+smooth(yawDeg,8,26))/2,0,1);
@@ -303,6 +317,6 @@ function angleAt(p,a,b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y
 function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
 function smooth(v,ok,bad){ if(v<=ok)return 0; if(v>=bad)return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
 function fitContain(iw,ih,ow,oh){ const s=Math.min(ow/iw,oh/ih); return { w:Math.round(iw*s), h:Math.round(ih*s) }; }
-function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.crossOrigin='anonymous'; i.onload=()=>res(i); i.src=src; }); }
+function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
 function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function clipRoundRect(ctx,x,y,w,h,r){ roundRect(ctx,x,y,w,h,r); ctx.clip(); }
