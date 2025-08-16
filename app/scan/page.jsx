@@ -12,7 +12,6 @@ export default function ScanPage() {
   const [consent, setConsent] = useState(true);
   const [imgURL, setImgURL] = useState('');
   const [res, setRes] = useState(null);
-
   const canRef = useRef(null);
 
   useEffect(() => {
@@ -41,12 +40,7 @@ export default function ScanPage() {
     try {
       const img = await loadImg(imgURL);
       const c = canRef.current;
-      const W = 640, H = 800;
-      c.width = W; c.height = H;
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = 'black'; ctx.fillRect(0,0,W,H);
-      const fit = fitContain(img.width, img.height, W, H);
-      ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
+      drawToCanvasCrisp(img, 640, 800, c);
 
       const det = await faceapi
         .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 }))
@@ -55,6 +49,7 @@ export default function ScanPage() {
       setRes(det?.landmarks ? scoreFromLandmarks(det.landmarks) : null);
     } catch (e) {
       console.error(e);
+      setRes(null);
     } finally {
       setBusy(false);
     }
@@ -68,7 +63,7 @@ export default function ScanPage() {
       <div className="rounded-xl border border-neutral-800 bg-black/40 p-4">
         <div className="aspect-[4/5] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900 flex items-center justify-center">
           {imgURL ? (
-            <img src={imgURL} alt="" className="w-full h-full object-contain" />
+            <img src={imgURL} alt="" className="analyze-preview w-full h-auto object-contain" />
           ) : (
             <p className="text-neutral-500 text-sm">No image</p>
           )}
@@ -91,11 +86,9 @@ export default function ScanPage() {
 
           <label className="ml-auto flex items-center gap-2 text-sm text-neutral-400">
             <input type="checkbox" checked={consent} onChange={(e)=>setConsent(e.target.checked)} />
-            I consent to analyze this image on‑device
+            I consent to analyze this image on-device
           </label>
         </div>
-
-        {!ready && <p className="mt-2 text-xs text-amber-400">Failed to initialize models from /public/models</p>}
       </div>
 
       {res && (
@@ -111,13 +104,12 @@ export default function ScanPage() {
   );
 }
 
-/* ---------- TF + models (singleton) ---------- */
+/* ---------- one-time TF + models ---------- */
 let __visionReady = false;
 async function ensureVisionReady() {
   if (__visionReady) return true;
   try { await tf.setBackend('webgl'); } catch { await tf.setBackend('cpu'); }
   await tf.ready();
-
   const URL = '/models';
   await Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri(URL),
@@ -127,7 +119,7 @@ async function ensureVisionReady() {
   return true;
 }
 
-/* ---------- UI ---------- */
+/* ---------- UI bits ---------- */
 function Card({ label, value, big=false }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
@@ -139,9 +131,44 @@ function Card({ label, value, big=false }) {
   );
 }
 
-/* ---------- scoring ---------- */
+/* ---------- drawing ---------- */
+function drawToCanvasCrisp(img, W, H, canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  canvas.style.width  = `${W}px`;
+  canvas.style.height = `${H}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  const fit = fitContain(img.width, img.height, W, H);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
+}
+
+/* ---------- robust scoring ---------- */
 function scoreFromLandmarks(landmarks) {
   const lm = landmarks.positions;
+  const dist = (a, b) => Math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y);
+  const safe = (v, fb = 1) => (Number.isFinite(v) && v > 0 ? v : fb);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const closeness10 = (ratio, ideal, k) => clamp(10 - Math.abs(ratio - ideal) * k, 0, 10);
+
+  const faceW = safe(dist(0, 16), 120);
+  const faceH = safe(dist(27, 8), 160);
+
+  const eyeL_w = safe(dist(36, 39), 30);
+  const eyeR_w = safe(dist(42, 45), 30);
+  const eye_w = (eyeL_w + eyeR_w) / 2;
+  const interocular = safe(dist(39, 42), 35);
+  const interpupillary = safe(dist(36, 45), 60);
+  const nose_w = safe(dist(31, 35), 40);
+  const mouth_w = safe(dist(48, 54), 65);
+
+  const upper2 = safe(dist(27, 33), faceH * 0.45);
+  const lower   = safe(dist(33, 8), faceH * 0.55);
 
   // symmetry
   const midX = lm[27].x;
@@ -152,68 +179,52 @@ function scoreFromLandmarks(landmarks) {
     const db = Math.abs(lm[b].x - midX);
     symErr += Math.abs(da - db);
   }
-  const { faceW, ratio } = robustFaceMetrics(lm);
+  symErr /= pairs.length;
   const symmetry = clamp(10 - (symErr / faceW) * 40, 0, 10);
 
-  // proportions (robust)
-  const IDEAL = 1.45;
-  const TOL = 0.20;
-  const excess = Math.max(0, Math.abs(ratio - IDEAL) - TOL);
-  const proportions = clamp(10 - excess * 25, 0, 10);
+  // proportions (blend)
+  const faceRatio     = closeness10(faceH / faceW, 1.45, 22);
+  const thirds        = closeness10(upper2 / lower, 1.0, 20);
+  const eyeSpacing    = closeness10(interocular / eye_w, 1.0, 18);
+  const noseBalance   = closeness10(nose_w / interocular, 1.0, 18);
+  const mouthBalance  = closeness10(mouth_w / interpupillary, 1.05, 25);
+  const proportions = clamp(
+    0.28*faceRatio + 0.22*thirds + 0.18*eyeSpacing + 0.16*noseBalance + 0.16*mouthBalance, 0, 10
+  );
 
   // jawline
-  const left = lm[4], right = lm[12];
-  const jaw = angleAt(lm[8], left, right) * 180/Math.PI;
+  const angleAt = (p, a, b) => {
+    const v1 = { x: lm[a].x - lm[p].x, y: lm[a].y - lm[p].y };
+    const v2 = { x: lm[b].x - lm[p].x, y: lm[b].y - lm[p].y };
+    const dot = v1.x*v2.x + v1.y*v2.y;
+    const m1 = Math.hypot(v1.x, v1.y), m2 = Math.hypot(v2.x, v2.y);
+    const cos = clamp(dot / (m1*m2 || 1), -1, 1);
+    return Math.acos(cos);
+  };
+  const jawDeg = angleAt(8, 4, 12) * 180/Math.PI;
   let jawline;
-  if (jaw < 60) jawline = 6 + (jaw - 60) * 0.02;
-  else if (jaw > 115) jawline = 6 - (jaw - 115) * 0.06;
-  else jawline = 8 + (1 - Math.abs(jaw - 90)/20) * 2;
+  if (jawDeg < 60)      jawline = 6 + (jawDeg - 60) * 0.02;
+  else if (jawDeg > 115) jawline = 6 - (jawDeg - 115) * 0.06;
+  else                   jawline = 8 + (1 - Math.abs(jawDeg - 90)/20) * 2;
   jawline = clamp(jawline, 0, 10);
 
   // pose penalty (gentle)
-  const pose = posePenalty(lm);
-  const base = 0.46*symmetry + 0.34*proportions + 0.20*jawline;
-  const overall = clamp(base - pose*1.25, 0, 10);
+  const posePenalty = (() => {
+    const L = lm[36], R = lm[45], nose = lm[33];
+    const eyeDX = R.x - L.x, eyeDY = R.y - L.y;
+    const roll = Math.abs(Math.atan2(eyeDY, eyeDX) * 180/Math.PI);
+    const midEye = { x:(L.x+R.x)/2, y:(L.y+R.y)/2 };
+    const eyeDist = Math.hypot(eyeDX, eyeDY) || 1;
+    const yaw = Math.abs((nose.x - midEye.x)/eyeDist) * 60;
+    const smooth = (v, ok, bad) => (v<=ok?0 : v>=bad?1 : ((t=(v-ok)/(bad-ok)), t*t*(3-2*t)));
+    return clamp((smooth(roll,5,22)+smooth(yaw,8,26))/2, 0, 1);
+  })();
 
-  // potential
-  const potential = clamp( overall + ((10-overall)*0.35) - pose*0.5, 0, 10 );
-
+  const overall   = clamp(0.46*symmetry + 0.34*proportions + 0.20*jawline - posePenalty*1.0, 0, 10);
+  const potential = clamp(overall + (10-overall)*0.35 - posePenalty*0.4, 0, 10);
   return { overall, potential, breakdown: { symmetry, proportions, jawline } };
 }
 
-function robustFaceMetrics(lm) {
-  const d = (a,b) => Math.hypot(lm[b].x-lm[a].x, lm[b].y-lm[a].y);
-  const minX = Math.min(...lm.map(p=>p.x)), maxX = Math.max(...lm.map(p=>p.x));
-  const widths = [
-    d(0,16), d(3,13), d(4,12), d(36,45)*2.2, (maxX-minX)*0.92
-  ].filter(v => Number.isFinite(v) && v > 0);
-  const median = a => { const s=[...a].sort((x,y)=>x-y), m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
-  const faceW = Math.max(1, median(widths));
-
-  const browPts = [17,18,19,20,21,22,23,24];
-  const browMid = browPts.reduce((acc,i)=>({x:acc.x+lm[i].x, y:acc.y+lm[i].y}), {x:0,y:0});
-  browMid.x/=browPts.length; browMid.y/=browPts.length;
-  const chin = lm[8];
-  const faceH = Math.hypot(chin.x-browMid.x, chin.y-browMid.y);
-
-  let ratio = faceH / faceW;
-  ratio = Math.max(0.9, Math.min(2.0, ratio));
-  return { faceW, faceH, ratio };
-}
-
-function posePenalty(lm) {
-  const L = lm[36], R = lm[45];
-  const eyeDX = R.x-L.x, eyeDY = R.y-L.y;
-  const rollDeg = Math.abs(Math.atan2(eyeDY, eyeDX) * 180/Math.PI);
-  const nose = lm[33]; const midEye = { x:(L.x+R.x)/2, y:(L.y+R.y)/2 };
-  const eyeDist = Math.hypot(eyeDX, eyeDY) || 1;
-  const yawDeg = Math.abs((nose.x - midEye.x)/eyeDist) * 60;
-  return clamp((smooth(rollDeg,5,22)+smooth(yawDeg,8,26))/2, 0, 1);
-}
-
-/* ---------- tiny utils ---------- */
-function angleAt(p, a, b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y}; const dot=v1.x*v2.x+v1.y*v2.y; const m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y); return Math.acos(clamp(dot/((m1*m2)||1),-1,1)); }
-function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
-function smooth(v, ok, bad){ if (v<=ok) return 0; if (v>=bad) return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
+/* ---------- misc utils ---------- */
 function fitContain(iw, ih, ow, oh){ const s=Math.min(ow/iw, oh/ih); return { w: Math.round(iw*s), h: Math.round(ih*s) }; }
 function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
