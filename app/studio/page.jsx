@@ -8,128 +8,150 @@ import '@tensorflow/tfjs-backend-webgl';
 import '@tensorflow/tfjs-backend-cpu';
 
 export default function FaceOffStudio() {
-  const [me, setMe] = useState({ loggedIn:false, pro:false, checking:true });
+  const [me, setMe] = useState({ loggedIn: false, pro: false, checking: true });
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(true);
 
-  const [left,  setLeft]  = useState({ url:'', res:null });
-  const [right, setRight] = useState({ url:'', res:null });
+  const [left, setLeft]   = useState({ url: '', res: null });
+  const [right, setRight] = useState({ url: '', res: null });
 
   const canvasRef = useRef(null);
 
-  // auth + model init
   useEffect(() => {
     let mounted = true;
     (async () => {
-      // auth
+      // auth gate
       try {
-        const r = await fetch('/api/me', { cache:'no-store' });
-        const j = r.ok ? await r.json() : { loggedIn:false, pro:false };
-        if (mounted) setMe({ ...j, checking:false });
+        const r = await fetch('/api/me', { cache: 'no-store' });
+        const j = r.ok ? await r.json() : { loggedIn: false, pro: false };
+        if (mounted) setMe({ ...j, checking: false });
       } catch {
-        if (mounted) setMe({ loggedIn:false, pro:false, checking:false });
+        if (mounted) setMe({ loggedIn: false, pro: false, checking: false });
       }
+
       // models
       try {
         await ensureVisionReady();
         if (mounted) setReady(true);
-      } catch (e) { console.error(e); }
+      } catch (e) {
+        console.error(e);
+      }
     })();
     return () => { mounted = false; };
   }, []);
 
   const pick = (side) => (e) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    const url = URL.createObjectURL(f);
-    (side==='left' ? setLeft : setRight)(s => ({ ...s, url, res:null }));
+    const f = e.target.files?.[0];
+    if (!f) return;
+    (side === 'left' ? setLeft : setRight)(s => ({ ...s, url: URL.createObjectURL(f), res: null }));
   };
 
   const analyze = async () => {
-    if (!ready || !consent) return;
+    if (!ready || !consent || busy) return;
     setBusy(true);
     try {
       const [l, r] = await Promise.all([
         left.url  ? analyzeOne(left.url)  : null,
         right.url ? analyzeOne(right.url) : null,
       ]);
-      setLeft(s => ({ ...s, res:l }));
-      setRight(s => ({ ...s, res:r }));
-    } catch (e) { console.error(e); }
-    finally { setBusy(false); }
+      setLeft(s => ({ ...s, res: l }));
+      setRight(s => ({ ...s, res: r }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const exportCard = async () => {
-    const W=1080, H=1920, pad=36;
-    const c=canvasRef.current; c.width=W; c.height=H;
-    const ctx=c.getContext('2d');
+    const W = 1080, H = 1920, pad = 36;
+    const c = canvasRef.current; c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
 
-    const g = ctx.createLinearGradient(0,0,0,H);
-    g.addColorStop(0,'#0b0b12'); g.addColorStop(1,'#111016');
-    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    // bg
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0b0b12'); g.addColorStop(1, '#111016');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 
-    ctx.fillStyle='#eee'; ctx.font='bold 64px system-ui'; ctx.textAlign='center';
+    // title
+    ctx.fillStyle = '#eee';
+    ctx.font = 'bold 64px system-ui';
+    ctx.textAlign = 'center';
     ctx.fillText('LooksLab Face-Off', W/2, 110);
 
-    const boxW=(W-pad*3)/2, boxH=Math.round(boxW*1.25);
+    // slots
+    const boxW = (W - pad * 3) / 2;
+    const boxH = Math.round(boxW * 1.25);
 
-    const draw = async (slot, x) => {
+    const drawSlot = async (slot, x) => {
       if (!slot?.url) return;
       const img = await loadImg(slot.url);
       const fit = fitContain(img.width, img.height, boxW, boxH);
       const y = 200;
 
-      ctx.fillStyle='#1c1b22'; roundRect(ctx,x,y,boxW,boxH,22); ctx.fill();
-      ctx.save(); clipRoundRect(ctx,x,y,boxW,boxH,22);
-      ctx.drawImage(img, x+(boxW-fit.w)/2, y+(boxH-fit.h)/2, fit.w, fit.h);
+      // frame + image
+      ctx.fillStyle = '#1c1b22';
+      roundRect(ctx, x, y, boxW, boxH, 22); ctx.fill();
+      ctx.save(); clipRoundRect(ctx, x, y, boxW, boxH, 22);
+      ctx.drawImage(img, x + (boxW - fit.w)/2, y + (boxH - fit.h)/2, fit.w, fit.h);
       ctx.restore();
 
+      // bars
       if (slot.res) {
-        const sY = y+boxH+40;
-        ctx.textAlign='left'; ctx.font='600 40px system-ui'; ctx.fillStyle='#cfcfe8';
+        const sY = y + boxH + 40;
+        ctx.textAlign = 'left';
+        ctx.font = '600 40px system-ui';
+        ctx.fillStyle = '#cfcfe8';
         ctx.fillText(`Overall ${slot.res.overall.toFixed(1)}/10`, x, sY);
 
         const bars = [
-          ['Symmetry', slot.res.breakdown.symmetry],
-          ['Jawline',  slot.res.breakdown.jawline],
-          ['Eye',      slot.res.breakdown.eyes],
-          ['Skin',     slot.res.breakdown.skin],
-          ['Balance',  slot.res.breakdown.balance],
-          ['Potential',slot.res.potential],
+          ['Symmetry',  slot.res.breakdown.symmetry],
+          ['Jawline',   slot.res.breakdown.jawline],
+          ['Eye',       slot.res.breakdown.eyes],
+          ['Skin',      slot.res.breakdown.skin],
+          ['Balance',   slot.res.breakdown.balance],
+          ['Potential', slot.res.potential],
         ];
-        let yy = sY+30;
+        let yy = sY + 30;
         for (const [label, val] of bars) {
           yy += 46;
-          ctx.fillStyle='#8b8a9c'; ctx.font='400 28px system-ui';
+          ctx.fillStyle = '#8b8a9c';
+          ctx.font = '400 28px system-ui';
           ctx.fillText(label, x, yy);
 
-          const bw=boxW, bh=14; yy+=10;
-          ctx.fillStyle='#2a2933'; roundRect(ctx,x,yy,bw,bh,8); ctx.fill();
-          ctx.fillStyle='#9b7dff'; roundRect(ctx,x,yy,(val/10)*bw,bh,8); ctx.fill();
+          const bw = boxW, bh = 14; yy += 10;
+          ctx.fillStyle = '#2a2933'; roundRect(ctx, x, yy, bw, bh, 8); ctx.fill();
+          ctx.fillStyle = '#9b7dff'; roundRect(ctx, x, yy, (val/10)*bw, bh, 8); ctx.fill();
 
-          yy+=12; ctx.textAlign='right'; ctx.fillStyle='#cfcfe8'; ctx.font='500 26px system-ui';
-          ctx.fillText(`${val.toFixed(1)}/10`, x+bw, yy);
-          ctx.textAlign='left';
+          yy += 12; ctx.textAlign = 'right'; ctx.fillStyle = '#cfcfe8'; ctx.font = '500 26px system-ui';
+          ctx.fillText(`${val.toFixed(1)}/10`, x + bw, yy);
+          ctx.textAlign = 'left';
         }
       }
     };
 
-    await draw(left, pad);
-    await draw(right, pad*2+boxW);
+    await drawSlot(left, pad);
+    await drawSlot(right, pad * 2 + boxW);
 
+    // watermark/tag
     if (me.pro) {
-      ctx.fillStyle='rgba(255,255,255,0.35)';
-      ctx.font='700 34px system-ui';
-      ctx.textAlign='right';
-      ctx.fillText('LooksLab • PRO', W-28, H-28);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.font = '700 34px system-ui';
+      ctx.textAlign = 'right';
+      ctx.fillText('LooksLab • PRO', W - 28, H - 28);
     } else {
-      ctx.save(); ctx.translate(W/2,H-120); ctx.rotate(-Math.PI/180*8);
-      ctx.fillStyle='rgba(255,255,255,0.10)'; ctx.font='900 110px system-ui'; ctx.textAlign='center';
-      ctx.fillText('looksLab.app', 0, 0); ctx.restore();
+      ctx.save(); ctx.translate(W/2, H - 120); ctx.rotate(-Math.PI/180 * 8);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.font = '900 110px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('looksLab.app', 0, 0);
+      ctx.restore();
     }
 
-    const url=c.toDataURL('image/jpeg',0.92);
-    const a=document.createElement('a'); a.href=url; a.download='lookslab-faceoff.jpg'; a.click();
+    // download
+    const url = c.toDataURL('image/jpeg', 0.92);
+    const a = document.createElement('a'); a.href = url; a.download = 'lookslab-faceoff.jpg'; a.click();
   };
 
   // gating
@@ -142,11 +164,11 @@ export default function FaceOffStudio() {
       <h1 className="text-3xl font-bold mt-10 mb-2">Face-Off Studio</h1>
       <p className="text-sm text-neutral-400 mb-6">Upload two pics → auto scores → export a 9:16 mog card.</p>
 
-      {!ready && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
+      {!ready && <p className="text-xs text-neutral-400">Loading face models…</p>}
 
       <div className="grid md:grid-cols-2 gap-5">
-        <Slot label="Left"  url={left.url}  res={left.res}  onPick={pick('left')}  clear={()=>setLeft({url:'',res:null})} />
-        <Slot label="Right" url={right.url} res={right.res} onPick={pick('right')} clear={()=>setRight({url:'',res:null})} />
+        <Slot label="Left"  url={left.url}  res={left.res}  onPick={pick('left')}  clear={() => setLeft({ url:'', res:null })} />
+        <Slot label="Right" url={right.url} res={right.res} onPick={pick('right')} clear={() => setRight({ url:'', res:null })} />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -177,25 +199,30 @@ export default function FaceOffStudio() {
   );
 }
 
-/* ---------- shared init ---------- */
-let __studioVisionReady = false;
-async function ensureVisionReady(){
-  if (__studioVisionReady) return true;
+/* ---------- init: single TF backend + single model load ---------- */
+
+let __visionReady = false;
+async function ensureVisionReady() {
+  if (__visionReady) return true;
   try { await tf.setBackend('webgl'); } catch { await tf.setBackend('cpu'); }
   await tf.ready();
-  const URL='/models';
+
+  const URL = '/models';
   await Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri(URL),
     faceapi.nets.faceLandmark68Net.loadFromUri(URL),
   ]);
-  __studioVisionReady = true;
+
+  __visionReady = true;
   return true;
 }
 
 /* ---------- components ---------- */
+
 function Shell({ children }) {
   return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>;
 }
+
 function Gate({ title, body, primary, secondary }) {
   return (
     <Shell>
@@ -213,6 +240,7 @@ function Gate({ title, body, primary, secondary }) {
     </Shell>
   );
 }
+
 function Slot({ label, url, res, onPick, clear }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
@@ -223,7 +251,11 @@ function Slot({ label, url, res, onPick, clear }) {
             <input type="file" accept="image/*" className="hidden" onChange={onPick} />
             Choose file
           </label>
-          {url && <button onClick={clear} className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 text-sm">Clear</button>}
+          {url && (
+            <button onClick={clear} className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 text-sm">
+              Clear
+            </button>
+          )}
         </div>
       </div>
 
@@ -245,6 +277,7 @@ function Slot({ label, url, res, onPick, clear }) {
     </div>
   );
 }
+
 function Row({ label, value }) {
   return (
     <div className="flex items-center justify-between">
@@ -254,15 +287,16 @@ function Row({ label, value }) {
   );
 }
 
-/* ---------- analysis (same core as Scan) ---------- */
+/* ---------- analysis ---------- */
+
 async function analyzeOne(url) {
   const img = await loadImg(url);
-  const W=640, H=800;
-  const c = document.createElement('canvas'); c.width=W; c.height=H;
+  const W = 640, H = 800;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
   const ctx = c.getContext('2d');
-  ctx.fillStyle='black'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = 'black'; ctx.fillRect(0, 0, W, H);
   const fit = fitContain(img.width, img.height, W, H);
-  ctx.drawImage(img, (W-fit.w)/2, (H-fit.h)/2, fit.w, fit.h);
+  ctx.drawImage(img, (W - fit.w)/2, (H - fit.h)/2, fit.w, fit.h);
 
   const det = await faceapi
     .detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 }))
@@ -272,9 +306,10 @@ async function analyzeOne(url) {
   return scoreFromLandmarks(det.landmarks, c);
 }
 
+// main scoring with: symmetry, jawline, eyes (open + matching), skin smoothness, balance; plus potential
 function scoreFromLandmarks(landmarks, canvas) {
   const lm = landmarks.positions;
-  const faceW = Math.hypot(lm[16].x - lm[0].x, lm[16].y - lm[0].y);
+  const faceW = Math.hypot(lm[16].x - lm[0].x, lm[16].y - lm[0].y) || 1;
 
   // symmetry
   const midX = lm[27].x;
@@ -285,93 +320,108 @@ function scoreFromLandmarks(landmarks, canvas) {
     const db = Math.abs(lm[b].x - midX);
     symErr += Math.abs(da - db);
   }
-  symErr /= pairs.length;
-  const symmetry = clamp(10 - (symErr / (faceW||1)) * 40, 0, 10);
+  const symmetry = clamp(10 - (symErr/faceW) * 40, 0, 10);
 
-  // jawline
-  const left = lm[4], right = lm[12], chin = lm[8];
-  const jawDeg = angleAt(chin, left, right) * 180/Math.PI;
+  // jawline angle at chin
+  const jawDeg = angleAt(lm[8], lm[4], lm[12]) * 180/Math.PI;
   let jawline;
-  if (jawDeg < 60) jawline = 6 + (jawDeg - 60) * 0.02;
+  if (jawDeg < 60)      jawline = 6 + (jawDeg - 60) * 0.02;
   else if (jawDeg > 115) jawline = 6 - (jawDeg - 115) * 0.06;
-  else jawline = 8 + (1 - Math.abs(jawDeg - 90)/20) * 2;
+  else                   jawline = 8 + (1 - Math.abs(jawDeg - 90)/20) * 2;
   jawline = clamp(jawline, 0, 10);
 
-  // eyes (openness + symmetry)
+  // eyes: openness + left/right match
   const eyeOpen = (eye) => {
-    const [t1,t2,b1,b2,L,R]=eye;
-    const vertical=((dist(t1,b1)+dist(t2,b2))/2);
-    const width=dist(L,R)||1;
-    return vertical/width;
+    const [t1,t2,b1,b2,L,R] = eye;
+    const vertical = (dist(t1,b1) + dist(t2,b2)) / 2;
+    const width = dist(L,R) || 1;
+    return vertical / width;
   };
-  const LE=[lm[37],lm[38],lm[41],lm[40],lm[36],lm[39]];
-  const RE=[lm[43],lm[44],lm[47],lm[46],lm[42],lm[45]];
-  const lo=eyeOpen(LE), ro=eyeOpen(RE);
-  const openScore = clamp(10 * smooth01((lo+ro)/2, 0.18, 0.35), 0, 10);
-  const matchScore = clamp(10 - Math.abs(lo-ro) * 80, 0, 10);
+  const LE = [lm[37],lm[38],lm[41],lm[40],lm[36],lm[39]];
+  const RE = [lm[43],lm[44],lm[47],lm[46],lm[42],lm[45]];
+  const lo = eyeOpen(LE), ro = eyeOpen(RE);
+  const openScore  = clamp(10 * smooth01((lo + ro)/2, 0.18, 0.35), 0, 10);
+  const matchScore = clamp(10 - Math.abs(lo - ro) * 80, 0, 10);
   const eyes = 0.65*openScore + 0.35*matchScore;
 
-  // skin (low luminance variance)
+  // skin: local luminance variance near nose (simple smoothness proxy)
   const skin = (() => {
     try {
       const ctx = canvas.getContext('2d');
       const cx = lm[33].x, cy = lm[33].y;
       const w = Math.max(20, faceW*0.35), h = Math.max(20, faceW*0.25);
       const x = Math.round(cx - w/2), y = Math.round(cy - h/3);
-      const img = ctx.getImageData(clamp(x,0,canvas.width-1), clamp(y,0,canvas.height-1), Math.min(w, canvas.width-x), Math.min(h, canvas.height-y));
-      const L = new Float32Array(img.width*img.height);
-      for (let i=0,j=0;i<img.data.length;i+=4,j++){
-        const r=img.data[i], g=img.data[i+1], b=img.data[i+2];
+      const rx = clamp(Math.max(x, 0), 0, canvas.width - 1);
+      const ry = clamp(Math.max(y, 0), 0, canvas.height - 1);
+      const rw = Math.min(w, canvas.width - rx);
+      const rh = Math.min(h, canvas.height - ry);
+      const img = ctx.getImageData(rx, ry, rw, rh);
+      const L = new Float32Array(img.width * img.height);
+      for (let i=0,j=0; i<img.data.length; i+=4, j++) {
+        const r = img.data[i], g = img.data[i+1], b = img.data[i+2];
         L[j] = 0.2126*r + 0.7152*g + 0.0722*b;
       }
-      const mean = L.reduce((a,b)=>a+b,0)/L.length || 1;
+      const mean = L.reduce((a,b)=>a+b,0) / L.length || 1;
       let varSum = 0; for (let v of L) varSum += (v-mean)*(v-mean);
       const variance = varSum / L.length;
-      return clamp(10 - smoothMap(variance, 120, 950)*10, 0, 10);
-    } catch { return 5.5; }
+      // map variance -> lower is better
+      return clamp(10 - smoothMap(variance, 120, 950) * 10, 0, 10);
+    } catch {
+      return 5.5; // safe default
+    }
   })();
 
-  // balance (simple harmony of feature ratios)
-  const noseW = dist(lm[31], lm[35]);
-  const mouthW = dist(lm[48], lm[54]);
-  const eyeW = dist(lm[36], lm[39]);
-  const midEyeDist = dist(lm[39], lm[42]);
-  const r1 = mouthW/(noseW||1);     // ~1.6
-  const r2 = midEyeDist/(eyeW||1);  // ~1.0
-  const lower = dist(lm[33], lm[8]);
-  const mid   = dist(lm[27], lm[33]);
-  const r3 = (lower/(mid||1));      // ~1.0–1.1
-  const s1 = 10 - Math.min(10, Math.abs(r1 - 1.6)*8);
-  const s2 = 10 - Math.min(10, Math.abs(r2 - 1.0)*10);
-  const s3 = 10 - Math.min(10, Math.abs(r3 - 1.05)*12);
+  // balance: three lightweight ratios
+  const noseW = dist(lm[31],lm[35]);
+  const mouthW = dist(lm[48],lm[54]);
+  const eyeW = dist(lm[36],lm[39]);
+  const midEyeDist = dist(lm[39],lm[42]);
+  const lower = dist(lm[33],lm[8]);
+  const mid   = dist(lm[27],lm[33]);
+
+  const r1 = mouthW / (noseW || 1);      // mouth vs nose width
+  const r2 = midEyeDist / (eyeW || 1);   // inter-eye vs eye width
+  const r3 = (lower / (mid || 1));       // lower face vs mid face
+
+  const s1 = 10 - Math.min(10, Math.abs(r1 - 1.6) * 8);
+  const s2 = 10 - Math.min(10, Math.abs(r2 - 1.0) * 10);
+  const s3 = 10 - Math.min(10, Math.abs(r3 - 1.05) * 12);
   const balance = clamp(0.4*s1 + 0.35*s2 + 0.25*s3, 0, 10);
 
-  // pose penalty + overall/potential
+  // pose penalty (gentle)
   const pose = posePenalty(lm);
+
+  // overall + potential
   const overallBase = 0.28*symmetry + 0.22*jawline + 0.18*eyes + 0.17*skin + 0.15*balance;
-  const overall = clamp(overallBase - pose*0.9, 0, 10);
-  const potential = clamp( overall + ((10-overall)*0.35) - pose*0.3, 0, 10 );
+  const overall = clamp(overallBase - pose * 0.9, 0, 10);
+  const potential = clamp(overall + ((10 - overall) * 0.35) - pose * 0.3, 0, 10);
 
   return { overall, potential, breakdown: { symmetry, jawline, eyes, skin, balance } };
 }
 
-/* ---------- helpers ---------- */
-function angleAt(p,a,b){ const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y}; const dot=v1.x*v2.x+v1.y*v2.y; const m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y); return Math.acos(clamp(dot/((m1*m2)||1),-1,1)); }
+/* ---------- math/utils ---------- */
+
+function angleAt(p, a, b) {
+  const v1 = { x: a.x - p.x, y: a.y - p.y };
+  const v2 = { x: b.x - p.x, y: b.y - p.y };
+  const dot = v1.x*v2.x + v1.y*v2.y;
+  const m1 = Math.hypot(v1.x, v1.y), m2 = Math.hypot(v2.x, v2.y);
+  return Math.acos(clamp(dot / ((m1*m2)||1), -1, 1));
+}
 function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
 function posePenalty(lm){
   const L=lm[36], R=lm[45];
   const eyeDX=R.x-L.x, eyeDY=R.y-L.y;
-  const roll=Math.abs(Math.atan2(eyeDY,eyeDX)*180/Math.PI);
-  const midEye={x:(L.x+R.x)/2,y:(L.y+R.y)/2};
-  const nose=lm[33];
+  const rollDeg=Math.abs(Math.atan2(eyeDY,eyeDX)*180/Math.PI);
+  const nose=lm[33], midEye={x:(L.x+R.x)/2, y:(L.y+R.y)/2};
   const eyeDist=Math.hypot(eyeDX,eyeDY)||1;
-  const yaw=Math.abs((nose.x-midEye.x)/eyeDist)*60;
-  return clamp((smooth(roll,5,22)+smooth(yaw,8,26))/2,0,1);
+  const yawDeg=Math.abs((nose.x-midEye.x)/eyeDist)*60;
+  return clamp((smooth(rollDeg,5,22)+smooth(yawDeg,8,26))/2, 0, 1);
 }
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 function smooth(v, ok, bad){ if (v<=ok) return 0; if (v>=bad) return 1; const t=(v-ok)/(bad-ok); return t*t*(3-2*t); }
 function smooth01(v, a, b){ if (v<=a) return 0; if (v>=b) return 1; const t=(v-a)/(b-a); return t*t*(3-2*t); }
-function smoothMap(v,a,b){ if (v<=a) return 0; if (v>=b) return 1; const t=(v-a)/(b-a); return t*t*(3-2*t); }
+function smoothMap(v, a, b){ if (v<=a) return 0; if (v>=b) return 1; const t=(v-a)/(b-a); return t*t*(3-2*t); }
 function fitContain(iw, ih, ow, oh){ const s=Math.min(ow/iw, oh/ih); return { w:Math.round(iw*s), h:Math.round(ih*s) }; }
 function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
 function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
