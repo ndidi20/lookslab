@@ -1,56 +1,51 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ensureVisionReady, detectSingleLandmarks, drawContainToCanvas } from '@/lib/vision';
-import { scoreFromLandmarks } from '@/lib/scoring';
+import { ensureVisionReady, drawContainToCanvas, detectLandmarksFromCanvas } from '@/lib/vision';
+import { computeScores } from '@/lib/scoring';
 
 export default function ScanPage() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(true);
   const [imgURL, setImgURL] = useState('');
-  const [res, setRes] = useState(null);
-  const viewRef = useRef(null); // preview image (not stretched)
+  const [scores, setScores] = useState(null);
+
+  const viewRef = useRef(null);  // visible canvas (for drawing & skin sampling)
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try { await ensureVisionReady(); if (mounted) setReady(true); }
-      catch { if (mounted) setReady(false); }
-    })();
-    return () => { mounted = false; };
+    (async () => { try { await ensureVisionReady(); setReady(true); } catch (e) { console.error(e); } })();
   }, []);
 
   const onPick = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     setImgURL(URL.createObjectURL(f));
-    setRes(null);
+    setScores(null);
   };
 
   const analyze = async () => {
-    if (!ready || !imgURL || !consent || !viewRef.current) return;
+    if (!ready || !imgURL || !consent) return;
     setBusy(true);
     try {
-      // render to analysis canvas (no stretch, smoothing high)
-      const canvas = drawContainToCanvas(viewRef.current, 640, 800);
-      const landmarks = await detectSingleLandmarks(canvas);
-      if (!landmarks) { setRes(null); return; }
-      setRes(scoreFromLandmarks(landmarks, canvas));
-    } catch (e) { console.error(e); }
-    finally { setBusy(false); }
+      const img = await loadImg(imgURL);
+      drawContainToCanvas(img, viewRef.current, 640, 800);
+      const det = await detectLandmarksFromCanvas(viewRef.current);
+      if (!det?.landmarks) { setScores(null); return; }
+      setScores(computeScores(det.landmarks, viewRef.current));
+    } catch (e) {
+      console.error(e);
+    } finally { setBusy(false); }
   };
 
   return (
     <main className="mx-auto max-w-5xl px-4 pb-24">
       <h1 className="text-3xl font-bold mt-10 mb-2">Face Scan</h1>
-      <p className="text-sm text-neutral-400 mb-6">All analysis runs in your browser. Images aren’t uploaded.</p>
+      <p className="text-sm text-neutral-400 mb-6">All analysis runs on-device. Images aren’t uploaded.</p>
 
       <div className="rounded-xl border border-neutral-800 bg-black/40 p-4">
-        <div className="aspect-[4/5] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900 flex items-center justify-center">
-          {imgURL
-            ? <img ref={viewRef} src={imgURL} alt="" className="w-full h-full object-contain" />
-            : <p className="text-neutral-500 text-sm">No image</p>}
+        <div className="aspect-[4/5] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900">
+          <canvas ref={viewRef} className="w-full h-full" />
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3 items-center">
@@ -76,29 +71,30 @@ export default function ScanPage() {
         {!ready && <p className="mt-2 text-xs text-amber-400">Failed to initialize models from /public/models</p>}
       </div>
 
-      {res && (
+      {scores && (
         <div className="mt-6 grid md:grid-cols-2 gap-4">
-          <ScoreRow big label="Overall" value={res.overall} />
-          <ScoreRow label="Symmetry" value={res.breakdown.symmetry} />
-          <ScoreRow label="Jawline" value={res.breakdown.jawline} />
-          <ScoreRow label="Eyes" value={res.breakdown.eyes} />
-          <ScoreRow label="Skin" value={res.breakdown.skin} />
-          <ScoreRow label="Balance" value={res.breakdown.balance} />
-          <ScoreRow label="Potential" value={res.potential} />
+          <Card label="Overall" value={scores.overall} big />
+          <Card label="Symmetry" value={scores.breakdown.symmetry} />
+          <Card label="Jawline" value={scores.breakdown.jawline} />
+          <Card label="Eyes" value={scores.breakdown.eyes} />
+          <Card label="Skin" value={scores.breakdown.skin} />
+          <Card label="Balance" value={scores.breakdown.balance} />
+          <Card label="Potential" value={scores.potential} />
         </div>
       )}
     </main>
   );
 }
 
-function ScoreRow({ label, value, big = false }) {
-  const v = Number.isFinite(value) ? value : 0;
+function Card({ label, value, big=false }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
       <div className={`flex items-center justify-between ${big ? 'text-xl font-semibold' : ''}`}>
         <span className="text-neutral-300">{label}</span>
-        <span className="font-mono">{v.toFixed(1)}/10</span>
+        <span className="font-mono">{value.toFixed(1)}/10</span>
       </div>
     </div>
   );
 }
+
+function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }

@@ -2,143 +2,126 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ensureVisionReady, detectSingleLandmarks, drawContainToCanvas } from '@/lib/vision';
-import { scoreFromLandmarks } from '@/lib/scoring';
+import { ensureVisionReady, drawContainToCanvas, detectLandmarksFromCanvas } from '@/lib/vision';
+import { computeScores } from '@/lib/scoring';
 
 export default function FaceOffStudio() {
-  const [me, setMe] = useState({ loggedIn: false, pro: false, checking: true });
+  const [me, setMe] = useState({ loggedIn:false, pro:false, checking:true });
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(true);
+  const [left,  setLeft]  = useState({ url:'', res:null });
+  const [right, setRight] = useState({ url:'', res:null });
 
-  const [left,  setLeft]  = useState({ url: '', res: null });
-  const [right, setRight] = useState({ url: '', res: null });
-
-  const canvasRef = useRef(null);
+  const leftRef = useRef(null);
+  const rightRef = useRef(null);
+  const exportRef = useRef(null);
 
   useEffect(() => {
-    let mounted = true;
     (async () => {
-      // auth (optional endpoint)
+      // fake me endpoint; keep your existing /api/me if you use auth
       try {
-        const r = await fetch('/api/me', { cache: 'no-store' });
-        const j = r.ok ? await r.json() : { loggedIn: false, pro: false };
-        if (mounted) setMe({ ...j, checking: false });
-      } catch { if (mounted) setMe({ loggedIn: false, pro: false, checking: false }); }
+        const r = await fetch('/api/me', { cache:'no-store' });
+        const j = r.ok ? await r.json() : { loggedIn:false, pro:false };
+        setMe({ ...j, checking:false });
+      } catch { setMe({ loggedIn:false, pro:false, checking:false }); }
 
-      try { await ensureVisionReady(); if (mounted) setReady(true); } catch {}
+      try { await ensureVisionReady(); setReady(true); } catch (e) { console.error(e); }
     })();
-    return () => { mounted = false; };
   }, []);
 
-  const pick = (side) => (e) => {
+  const pick = (side) => async (e) => {
     const f = e.target.files?.[0]; if (!f) return;
     const url = URL.createObjectURL(f);
-    (side === 'left' ? setLeft : setRight)(s => ({ ...s, url, res: null }));
+    (side==='left' ? setLeft : setRight)(s => ({ ...s, url, res:null }));
+    const img = await loadImg(url);
+    drawContainToCanvas(img, side==='left' ? leftRef.current : rightRef.current, 640, 800);
   };
 
   const analyze = async () => {
     if (!ready || !consent) return;
     setBusy(true);
     try {
-      const [l, r] = await Promise.all([
-        left.url  ? analyzeOne(left.url)  : null,
-        right.url ? analyzeOne(right.url) : null,
+      const [dl, dr] = await Promise.all([
+        left.url  ? detectLandmarksFromCanvas(leftRef.current)  : null,
+        right.url ? detectLandmarksFromCanvas(rightRef.current) : null,
       ]);
-      setLeft(s => ({ ...s, res: l }));
-      setRight(s => ({ ...s, res: r }));
-    } catch (e) { console.error(e); }
-    finally { setBusy(false); }
+      setLeft(s => ({ ...s, res: dl?.landmarks ? computeScores(dl.landmarks, leftRef.current) : null }));
+      setRight(s => ({ ...s, res: dr?.landmarks ? computeScores(dr.landmarks, rightRef.current) : null }));
+    } catch (e) {
+      console.error(e);
+    } finally { setBusy(false); }
   };
 
   const exportCard = async () => {
-    if (!left.res && !right.res) return;
-    const W = 1080, H = 1920, pad = 36;
-    const c = canvasRef.current; c.width = W; c.height = H;
-    const ctx = c.getContext('2d');
+    const W=1080, H=1920, pad=36;
+    const c=exportRef.current; c.width=W; c.height=H;
+    const ctx=c.getContext('2d');
 
-    // background
-    const g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, '#0b0b12'); g.addColorStop(1, '#111016');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#0b0b12'); g.addColorStop(1,'#111016');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
 
-    ctx.fillStyle = '#eee'; ctx.font = 'bold 64px system-ui'; ctx.textAlign = 'center';
+    ctx.fillStyle='#eee'; ctx.font='bold 64px system-ui'; ctx.textAlign='center';
     ctx.fillText('LooksLab Face-Off', W/2, 110);
 
-    const cols = 2;
-    const boxW = (W - pad * (cols + 1)) / cols;
-    const boxH = Math.round(boxW * 1.25);
+    const boxW=(W-pad*3)/2, boxH=Math.round(boxW*1.25);
 
-    const drawSlot = async (slot, x) => {
+    const draw = async (slot, srcCanvas, x) => {
       if (!slot?.url) return;
-      const img = await loadImg(slot.url);
-
-      // contain fit
-      ctx.fillStyle = '#1c1b22';
-      roundRect(ctx, x, 200, boxW, boxH, 22); ctx.fill();
-      ctx.save(); clipRoundRect(ctx, x, 200, boxW, boxH, 22);
-
-      const iw = img.naturalWidth, ih = img.naturalHeight;
-      const s = Math.min(boxW / iw, boxH / ih);
-      const w = Math.round(iw * s), h = Math.round(ih * s);
-      const dx = x + Math.round((boxW - w) / 2), dy = 200 + Math.round((boxH - h) / 2);
-      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, dx, dy, w, h);
+      const y = 200;
+      ctx.fillStyle='#1c1b22'; roundRect(ctx,x,y,boxW,boxH,22); ctx.fill();
+      ctx.save(); clipRoundRect(ctx,x,y,boxW,boxH,22);
+      ctx.drawImage(srcCanvas, x, y, boxW, boxH);
       ctx.restore();
 
       if (slot.res) {
-        const sY = 200 + boxH + 40;
-        ctx.textAlign = 'left'; ctx.font = '600 40px system-ui'; ctx.fillStyle = '#cfcfe8';
+        const sY = y+boxH+40;
+        ctx.textAlign='left'; ctx.font='600 40px system-ui'; ctx.fillStyle='#cfcfe8';
         ctx.fillText(`Overall ${slot.res.overall.toFixed(1)}/10`, x, sY);
 
         const bars = [
-          ['Symmetry',  slot.res.breakdown.symmetry],
-          ['Jawline',   slot.res.breakdown.jawline],
-          ['Eyes',      slot.res.breakdown.eyes],
-          ['Skin',      slot.res.breakdown.skin],
-          ['Balance',   slot.res.breakdown.balance],
-          ['Potential', slot.res.potential],
+          ['Symmetry', slot.res.breakdown.symmetry],
+          ['Jawline',  slot.res.breakdown.jawline],
+          ['Eyes',     slot.res.breakdown.eyes],
+          ['Skin',     slot.res.breakdown.skin],
+          ['Balance',  slot.res.breakdown.balance],
+          ['Potential',slot.res.potential],
         ];
-
-        let yy = sY + 30;
+        let yy = sY+30;
         for (const [label, val] of bars) {
           yy += 46;
-          ctx.fillStyle = '#8b8a9c'; ctx.font = '400 28px system-ui';
+          ctx.fillStyle='#8b8a9c'; ctx.font='400 28px system-ui';
           ctx.fillText(label, x, yy);
-
-          const bw = boxW, bh = 14; yy += 10;
-          ctx.fillStyle = '#2a2933'; roundRect(ctx, x, yy, bw, bh, 8); ctx.fill();
-          ctx.fillStyle = '#9b7dff'; roundRect(ctx, x, yy, (Math.max(0, Math.min(10, val)) / 10) * bw, bh, 8); ctx.fill();
-
-          yy += 12; ctx.textAlign = 'right'; ctx.fillStyle = '#cfcfe8'; ctx.font = '500 26px system-ui';
-          ctx.fillText(`${Math.max(0, Math.min(10, val)).toFixed(1)}/10`, x + bw, yy);
-          ctx.textAlign = 'left';
+          const bw=boxW, bh=14; yy+=10;
+          ctx.fillStyle='#2a2933'; roundRect(ctx,x,yy,bw,bh,8); ctx.fill();
+          ctx.fillStyle='#9b7dff'; roundRect(ctx,x,yy,(val/10)*bw,bh,8); ctx.fill();
+          yy+=12; ctx.textAlign='right'; ctx.fillStyle='#cfcfe8'; ctx.font='500 26px system-ui';
+          ctx.fillText(`${val.toFixed(1)}/10`, x+bw, yy);
+          ctx.textAlign='left';
         }
       }
     };
 
-    await drawSlot(left, pad);
-    await drawSlot(right, pad * 2 + boxW);
+    await draw(left, leftRef.current, pad);
+    await draw(right, rightRef.current, pad*2+boxW);
 
     if (me.pro) {
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.font = '700 34px system-ui';
-      ctx.textAlign = 'right';
-      ctx.fillText('LooksLab • PRO', W - 28, H - 28);
+      ctx.fillStyle='rgba(255,255,255,0.35)'; ctx.font='700 34px system-ui';
+      ctx.textAlign='right'; ctx.fillText('LooksLab • PRO', W-28, H-28);
     } else {
-      ctx.save(); ctx.translate(W/2, H - 120); ctx.rotate(-Math.PI/180 * 8);
-      ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.font = '900 110px system-ui'; ctx.textAlign = 'center';
-      ctx.fillText('looksLab.app', 0, 0); ctx.restore();
+      ctx.save(); ctx.translate(W/2, H-120); ctx.rotate(-Math.PI/180*8);
+      ctx.fillStyle='rgba(255,255,255,0.10)'; ctx.font='900 110px system-ui';
+      ctx.textAlign='center'; ctx.fillText('looksLab.app', 0, 0); ctx.restore();
     }
 
-    const url = c.toDataURL('image/jpeg', 0.92);
-    const a = document.createElement('a'); a.href = url; a.download = 'lookslab-faceoff.jpg'; a.click();
+    const url=c.toDataURL('image/jpeg',0.92);
+    const a=document.createElement('a'); a.href=url; a.download='lookslab-faceoff.jpg'; a.click();
   };
 
-  // gating (optional)
   if (me.checking) return <Shell><p className="text-neutral-400">Checking access…</p></Shell>;
   if (!me.loggedIn) return <Gate title="Face-Off Studio" body="Sign in to use Face-Off Studio and export cards." primary={{href:'/login',label:'Log in'}} secondary={{href:'/',label:'Back home'}} />;
-  if (!me.pro)      return <Gate title="Face-Off Studio (Pro)" body="This feature is for Pro members." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
+  if (!me.pro)      return <Gate title="Face-Off Studio (Pro)" body="This feature is for Pro members. Upgrade to unlock Face-Off cards and watermark-light exports." primary={{href:'/pro',label:'Go Pro'}} secondary={{href:'/',label:'Back home'}} />;
 
   return (
     <Shell>
@@ -148,8 +131,22 @@ export default function FaceOffStudio() {
       {!ready && <p className="text-xs text-amber-400">Failed to initialize models from /public/models</p>}
 
       <div className="grid md:grid-cols-2 gap-5">
-        <Slot label="Left"  slot={left}  onPick={pick('left')}  clear={()=>setLeft({url:'',res:null})} />
-        <Slot label="Right" slot={right} onPick={pick('right')} clear={()=>setRight({url:'',res:null})} />
+        <Slot
+          label="Left"
+          url={left.url}
+          res={left.res}
+          onPick={pick('left')}
+          clear={()=>setLeft({url:'',res:null})}
+          canvasRef={leftRef}
+        />
+        <Slot
+          label="Right"
+          url={right.url}
+          res={right.res}
+          onPick={pick('right')}
+          clear={()=>setRight({url:'',res:null})}
+          canvasRef={rightRef}
+        />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -166,7 +163,7 @@ export default function FaceOffStudio() {
           disabled={!left.res && !right.res}
           className="px-4 py-2 rounded border border-neutral-700 hover:bg-neutral-900"
         >
-          Export Card {me.pro ? '(subtle tag)' : '(watermark)'}
+          Export Mog Card {me.pro ? '(subtle tag)' : '(watermark)'}
         </button>
 
         <label className="ml-auto flex items-center gap-2 text-sm text-neutral-400">
@@ -175,77 +172,12 @@ export default function FaceOffStudio() {
         </label>
       </div>
 
-      <canvas ref={canvasRef} className="hidden" />
+      <canvas ref={exportRef} className="hidden" />
     </Shell>
   );
 }
 
-/* helpers used inside Studio */
-async function analyzeOne(url) {
-  const img = await loadImg(url);
-  const canvas = (function makeCanvas(img) {
-    const c = document.createElement('canvas'); c.width = 640; c.height = 800;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = 'black'; ctx.fillRect(0, 0, c.width, c.height);
-    const s = Math.min(c.width / img.naturalWidth, c.height / img.naturalHeight);
-    const w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
-    const dx = Math.round((c.width - w) / 2), dy = Math.round((c.height - h) / 2);
-    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, dx, dy, w, h);
-    return c;
-  })();
-
-  const lm = await detectSingleLandmarks(canvas);
-  if (!lm) return null;
-  return scoreFromLandmarks(lm, canvas);
-}
-
-function Slot({ label, slot, onPick, clear }) {
-  return (
-    <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="font-semibold">{label}</h3>
-        <div className="flex gap-2">
-          <label className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 cursor-pointer text-sm">
-            <input type="file" accept="image/*" className="hidden" onChange={onPick} />
-            Choose file
-          </label>
-          {slot.url && (
-            <button onClick={clear} className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 text-sm">
-              Clear
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="aspect-[3/4] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900 flex items-center justify-center">
-        {slot.url ? <img src={slot.url} alt="" className="w-full h-full object-contain" /> : <p className="text-neutral-500 text-sm">No image</p>}
-      </div>
-
-      {slot.res && (
-        <div className="mt-3 text-sm grid grid-cols-2 gap-1">
-          <Row label="Overall"   value={slot.res.overall} />
-          <Row label="Symmetry"  value={slot.res.breakdown.symmetry} />
-          <Row label="Jawline"   value={slot.res.breakdown.jawline} />
-          <Row label="Eyes"      value={slot.res.breakdown.eyes} />
-          <Row label="Skin"      value={slot.res.breakdown.skin} />
-          <Row label="Balance"   value={slot.res.breakdown.balance} />
-          <Row label="Potential" value={slot.res.potential} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Row({ label, value }) {
-  const v = Number.isFinite(value) ? value : 0;
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-neutral-300">{label}</span>
-      <span className="font-mono">{v.toFixed(1)}/10</span>
-    </div>
-  );
-}
+/* UI bits */
 function Shell({ children }) { return <main className="mx-auto max-w-5xl px-4 pb-28">{children}</main>; }
 function Gate({ title, body, primary, secondary }) {
   return (
@@ -264,6 +196,48 @@ function Gate({ title, body, primary, secondary }) {
     </Shell>
   );
 }
+function Slot({ label, url, res, onPick, clear, canvasRef }) {
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-black/40 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-semibold">{label}</h3>
+        <div className="flex gap-2">
+          <label className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 cursor-pointer text-sm">
+            <input type="file" accept="image/*" className="hidden" onChange={onPick} />
+            Choose file
+          </label>
+          {url && <button onClick={clear} className="px-3 py-1.5 rounded border border-neutral-700 hover:bg-neutral-900 text-sm">Clear</button>}
+        </div>
+      </div>
+
+      <div className="aspect-[3/4] w-full rounded-md overflow-hidden bg-black/30 border border-neutral-900">
+        <canvas ref={canvasRef} className="w-full h-full" />
+      </div>
+
+      {res && (
+        <div className="mt-3 text-sm grid grid-cols-2 gap-1">
+          <Row label="Overall"   value={res.overall} />
+          <Row label="Symmetry"  value={res.breakdown.symmetry} />
+          <Row label="Jawline"   value={res.breakdown.jawline} />
+          <Row label="Eyes"      value={res.breakdown.eyes} />
+          <Row label="Skin"      value={res.breakdown.skin} />
+          <Row label="Balance"   value={res.breakdown.balance} />
+          <Row label="Potential" value={res.potential} />
+        </div>
+      )}
+    </div>
+  );
+}
+function Row({ label, value }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-neutral-300">{label}</span>
+      <span className="font-mono">{value.toFixed(1)}/10</span>
+    </div>
+  );
+}
+
+/* tiny utils for export shapes */
 function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function clipRoundRect(ctx,x,y,w,h,r){ roundRect(ctx,x,y,w,h,r); ctx.clip(); }
 function loadImg(src){ return new Promise(res=>{ const i=new Image(); i.onload=()=>res(i); i.src=src; }); }
