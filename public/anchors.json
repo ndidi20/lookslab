@@ -1,0 +1,7 @@
+{
+  "symmetry": { "mean": 6.2, "std": 1.4 },
+  "jawline":  { "mean": 6.0, "std": 1.6 },
+  "eyes":     { "mean": 6.1, "std": 1.5 },
+  "skin":     { "mean": 6.3, "std": 1.2 },
+  "balance":  { "mean": 6.4, "std": 1.3 }
+}
